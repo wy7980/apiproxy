@@ -1,0 +1,563 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/wangyong/apiproxy/internal/api"
+	"github.com/wangyong/apiproxy/internal/auth"
+	"github.com/wangyong/apiproxy/internal/breaker"
+	"github.com/wangyong/apiproxy/internal/config"
+	"github.com/wangyong/apiproxy/internal/fallback"
+	"github.com/wangyong/apiproxy/internal/metrics"
+	"github.com/wangyong/apiproxy/internal/provider"
+	"github.com/wangyong/apiproxy/internal/provider/openai"
+	"github.com/wangyong/apiproxy/internal/router"
+	"github.com/wangyong/apiproxy/internal/storage"
+)
+
+type Server struct {
+	cfg       *config.Config
+	logger    *slog.Logger
+	authStore *auth.KeyStore
+	router    *router.Router
+	breaker   *breaker.Breaker
+	providers map[string]provider.Provider
+	store     storage.EventWriter
+}
+
+func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
+	authStore := buildAuthStore(cfg)
+
+	providers := make(map[string]provider.Provider, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		apiKey := cfg.ProviderAPIKey(name)
+		switch p.Type {
+		case "openai":
+			httpClient := &http.Client{Timeout: p.Timeout}
+			providers[name] = openai.New(provider.Config{
+				Name:    name,
+				BaseURL: p.BaseURL,
+				APIKey:  apiKey,
+				Timeout: p.Timeout,
+			}, httpClient)
+		default:
+			return nil, fmt.Errorf("unsupported provider type %q for %q", p.Type, name)
+		}
+	}
+
+	return &Server{
+		cfg:       cfg,
+		logger:    logger,
+		authStore: authStore,
+		router:    router.New(cfg.Routes),
+		breaker:   breaker.New(),
+		providers: providers,
+		store:     storage.NoopWriter{},
+	}, nil
+}
+
+// WithStore attaches a storage writer for durable request recording.
+func (s *Server) WithStore(w storage.EventWriter) *Server {
+	s.store = w
+	return s
+}
+
+// NewWithProviders builds a Server using pre-constructed providers (for testing).
+func NewWithProviders(cfg *config.Config, logger *slog.Logger, provs map[string]provider.Provider) *Server {
+	return &Server{
+		cfg:       cfg,
+		logger:    logger,
+		authStore: buildAuthStore(cfg),
+		router:    router.New(cfg.Routes),
+		breaker:   breaker.New(),
+		providers: provs,
+		store:     storage.NoopWriter{},
+	}
+}
+
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
+
+	if s.cfg.Metrics.Prometheus.Enabled {
+		path := s.cfg.Metrics.Prometheus.Path
+		mux.Handle(path, promhttp.Handler())
+	}
+
+	mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
+	mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
+
+	return mux
+}
+
+func (s *Server) withMiddleware(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Apiproxy", "1")
+		clientID := "anonymous"
+		if s.cfg.Auth.Enabled {
+			id, ok := s.authStore.Authenticate(r)
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{
+					"error": map[string]any{
+						"type":    "invalid_api_key",
+						"message": "missing or invalid API key",
+					},
+				})
+				return
+			}
+			clientID = id
+		}
+		r = withClientID(r, clientID)
+		h(w, r)
+	}
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
+	models := make([]map[string]any, 0, len(s.cfg.Routes))
+	for name := range s.cfg.Routes {
+		models = append(models, map[string]any{
+			"id": name, "object": "model", "owned_by": "apiproxy",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
+}
+
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+
+	clientID := clientIDFromContext(r.Context())
+	requestID := newRequestID()
+	start := time.Now()
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "read_body_error", err.Error())
+		return
+	}
+
+	parsed, err := api.ParseChatCompletionRequest(body)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	resolved, err := s.router.Resolve(parsed.Model)
+	if err != nil {
+		writeOpenAIError(w, http.StatusNotFound, "model_not_found", err.Error())
+		return
+	}
+
+	if parsed.Stream {
+		s.handleStream(w, r, requestID, clientID, resolved, body, parsed, start)
+		return
+	}
+	s.handleNonStream(w, r, requestID, clientID, resolved, body, parsed, start)
+}
+
+// handleNonStream runs the priority fallback chain for non-streaming requests.
+func (s *Server) handleNonStream(
+	w http.ResponseWriter, r *http.Request,
+	requestID, clientID string,
+	resolved *router.ResolvedRoute,
+	body []byte,
+	parsed api.ChatCompletionRequest,
+	start time.Time,
+) {
+	targets := resolved.OrderedTargets()
+	maxAttempts := resolved.Fallback.MaxAttempts
+	if maxAttempts <= 0 || maxAttempts > len(targets) {
+		maxAttempts = len(targets)
+	}
+
+	var lastErr *provider.Error
+	var fallbackFrom, fallbackTo string
+
+	for i := 0; i < maxAttempts; i++ {
+		target := targets[i]
+		prov, ok := s.providers[target.Provider]
+		if !ok {
+			continue
+		}
+		if !s.breaker.Allow(target.Provider) {
+			lastErr = &provider.Error{Kind: provider.KindServerError, Message: "circuit open", StatusCode: 503}
+			continue
+		}
+
+		// Rewrite the model to the upstream target model.
+		upstreamBody, err := api.ReplaceModel(body, target.Model)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: false}
+		resp, perr := prov.Chat(ctx, chReq)
+		cancel()
+
+		if i > 0 && fallbackFrom == "" {
+			fallbackFrom = targets[0].Provider + ":" + targets[0].Model
+		}
+
+		if perr == nil && resp.Err == nil {
+			fallbackTo = target.Provider + ":" + target.Model
+			for k, v := range resp.Header {
+				if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+					continue
+				}
+				w.Header()[k] = v
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Request-Id", requestID)
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(resp.Body)
+
+			metrics.RecordRequest(metrics.RequestLog{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       resp.StatusCode,
+				LatencyMs:        float64(time.Since(start).Milliseconds()),
+				PromptTokens:     resp.Usage.PromptTokens,
+				CompletionTokens: resp.Usage.CompletionTokens,
+				TotalTokens:      resp.Usage.TotalTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           false,
+			})
+			s.recordEvent(storage.Event{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       resp.StatusCode,
+				LatencyMs:        float64(time.Since(start).Milliseconds()),
+				PromptTokens:     resp.Usage.PromptTokens,
+				CompletionTokens: resp.Usage.CompletionTokens,
+				TotalTokens:      resp.Usage.TotalTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           false,
+			})
+			return
+		}
+
+		if perr != nil {
+			lastErr = &provider.Error{Kind: provider.KindConnectError, Message: perr.Error(), Cause: perr}
+		} else {
+			lastErr = resp.Err
+		}
+
+		if !fallback.ShouldFallback(resolved.Fallback, lastErr) {
+			break
+		}
+	}
+
+	statusCode := http.StatusBadGateway
+	errType := "upstream_error"
+	errMsg := "all providers failed"
+	if lastErr != nil {
+		if lastErr.StatusCode != 0 {
+			statusCode = lastErr.StatusCode
+		}
+		errMsg = lastErr.Message
+		errType = string(lastErr.Kind)
+	}
+	writeOpenAIError(w, statusCode, errType, errMsg)
+}
+
+// handleStream proxies a streaming response and applies fallback only before the first chunk is sent.
+func (s *Server) handleStream(
+	w http.ResponseWriter, r *http.Request,
+	requestID, clientID string,
+	resolved *router.ResolvedRoute,
+	body []byte,
+	parsed api.ChatCompletionRequest,
+	start time.Time,
+) {
+	targets := resolved.OrderedTargets()
+	maxAttempts := resolved.Fallback.MaxAttempts
+	if maxAttempts <= 0 || maxAttempts > len(targets) {
+		maxAttempts = len(targets)
+	}
+
+	var firstTokenTime time.Time
+	var fallbackFrom, fallbackTo string
+	var promptTokens, completionTokens int
+
+	for i := 0; i < maxAttempts; i++ {
+		target := targets[i]
+		prov, ok := s.providers[target.Provider]
+		if !ok {
+			continue
+		}
+		if !s.breaker.Allow(target.Provider) {
+			continue
+		}
+
+		upstreamBody, err := api.ReplaceModel(body, target.Model)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: true}
+		ch, perr := prov.ChatStream(ctx, chReq)
+
+		if perr != nil {
+			cancel()
+			s.logger.Warn("stream open failed",
+				"request_id", requestID, "provider", target.Provider, "err", perr.Error())
+			if i == 0 {
+				fallbackFrom = target.Provider + ":" + target.Model
+			}
+			continue
+		}
+
+		// We have a stream. Once we write the first chunk we lose fallback ability.
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Request-Id", requestID)
+		w.WriteHeader(http.StatusOK)
+
+		fallbackTo = target.Provider + ":" + target.Model
+		var streamFailed bool
+		for chunk := range ch {
+			if chunk.Err != nil {
+				streamFailed = true
+				s.logger.Warn("stream chunk error",
+					"request_id", requestID, "provider", target.Provider, "err", chunk.Err.Error())
+				break
+			}
+			if firstTokenTime.IsZero() {
+				firstTokenTime = time.Now()
+			}
+			// Extract usage from the final chunk if present.
+			promptTokens, completionTokens = maybeExtractUsage(chunk.Data, promptTokens, completionTokens)
+			_, _ = w.Write(chunk.Data)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		cancel()
+
+		if !streamFailed {
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			latMs := float64(time.Since(start).Milliseconds())
+			ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
+			metrics.RecordRequest(metrics.RequestLog{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       http.StatusOK,
+				LatencyMs:        latMs,
+				FirstTokenMs:     ftMs,
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           true,
+			})
+			s.recordEvent(storage.Event{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       http.StatusOK,
+				LatencyMs:        latMs,
+				FirstTokenMs:     ftMs,
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           true,
+			})
+			return
+		}
+
+		// Stream failed mid-way: we already wrote a 200, so we cannot fallback.
+		latMs := float64(time.Since(start).Milliseconds())
+		ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
+		metrics.RecordRequest(metrics.RequestLog{
+			RequestID:        requestID,
+			ClientID:         clientID,
+			Route:            resolved.Name,
+			Provider:         target.Provider,
+			Model:            target.Model,
+			StatusCode:       http.StatusOK,
+			LatencyMs:        latMs,
+			FirstTokenMs:     ftMs,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			FallbackCount:    i,
+			FallbackFrom:     fallbackFrom,
+			FallbackTo:       fallbackTo,
+			Stream:           true,
+			ErrorType:        "stream_error",
+		})
+		s.recordEvent(storage.Event{
+			RequestID:        requestID,
+			ClientID:         clientID,
+			Route:            resolved.Name,
+			Provider:         target.Provider,
+			Model:            target.Model,
+			StatusCode:       http.StatusOK,
+			LatencyMs:        latMs,
+			FirstTokenMs:     ftMs,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			FallbackCount:    i,
+			FallbackFrom:     fallbackFrom,
+			FallbackTo:       fallbackTo,
+			Stream:           true,
+			ErrorType:        "stream_error",
+		})
+		return
+	}
+
+	writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "all providers failed for stream")
+}
+
+func (s *Server) recordEvent(e storage.Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.Record(ctx, e); err != nil {
+		s.logger.Warn("storage record failed", "err", err)
+	}
+}
+
+func (s *Server) providerTimeout(name string) time.Duration {
+	p, ok := s.cfg.Providers[name]
+	if !ok || p.Timeout == 0 {
+		return s.cfg.Server.RequestTimeout
+	}
+	return p.Timeout
+}
+
+// ---------- helpers ----------
+
+type contextKey string
+
+const ctxKeyClientID contextKey = "client_id"
+
+func withClientID(r *http.Request, id string) *http.Request {
+	ctx := context.WithValue(r.Context(), ctxKeyClientID, id)
+	return r.WithContext(ctx)
+}
+
+func clientIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyClientID).(string); ok {
+		return v
+	}
+	return "anonymous"
+}
+
+func newRequestID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "req_" + hex.EncodeToString(b)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeOpenAIError(w http.ResponseWriter, status int, errType, msg string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"type":    errType,
+			"message": msg,
+			"code":    status,
+		},
+	})
+}
+
+func maybeExtractUsage(chunk []byte, prompt, completion int) (int, int) {
+	// SSE chunks look like "data: {...}\n\n". Try to find usage in the final chunk.
+	idx := bytes.Index(chunk, []byte("\"usage\""))
+	if idx < 0 {
+		return prompt, completion
+	}
+	var parsed struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	// Try to extract just the JSON object.
+	dataStart := bytes.Index(chunk, []byte("data: "))
+	if dataStart < 0 {
+		return prompt, completion
+	}
+	payload := chunk[dataStart+6:]
+	if n := bytes.Index(payload, []byte("\n")); n >= 0 {
+		payload = payload[:n]
+	}
+	payload = bytes.TrimSpace(payload)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return prompt, completion
+	}
+	if json.Unmarshal(payload, &parsed) != nil {
+		return prompt, completion
+	}
+	if parsed.Usage.PromptTokens > 0 {
+		prompt = parsed.Usage.PromptTokens
+	}
+	if parsed.Usage.CompletionTokens > 0 {
+		completion = parsed.Usage.CompletionTokens
+	}
+	return prompt, completion
+}
+
+func buildAuthStore(cfg *config.Config) *auth.KeyStore {
+	pairs := make([][2]string, 0, len(cfg.Auth.APIKeys))
+	for _, k := range cfg.Auth.APIKeys {
+		pairs = append(pairs, [2]string{k.Key, k.ClientID})
+	}
+	return auth.NewKeyStore(pairs)
+}
+
+var _ = errors.New

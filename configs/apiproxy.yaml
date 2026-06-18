@@ -1,0 +1,105 @@
+server:
+  listen: ":8080"
+  read_timeout: 60s
+  write_timeout: 120s
+  request_timeout: 120s
+
+auth:
+  enabled: true
+  # API keys can also be supplied via AUTH_API_KEYS (comma separated).
+  api_keys:
+    - key: "demo-key"
+      client_id: "demo"
+
+providers:
+  openai:
+    type: openai
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    api_key: ""
+    timeout: 60s
+    tier: advanced
+
+  deepseek:
+    type: openai
+    base_url: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+    api_key: ""
+    timeout: 60s
+    tier: standard
+
+  qwen:
+    type: openai
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key_env: "DASHSCOPE_API_KEY"
+    api_key: ""
+    timeout: 60s
+    tier: standard
+
+routes:
+  smart-chat:
+    strategy: priority
+    fallback:
+      enabled: true
+      max_attempts: 3
+      on_status: [408, 409, 425, 429, 500, 502, 503, 504]
+      on_timeout: true
+      on_connect_error: true
+      allow_downgrade: false
+    providers:
+      - provider: openai
+        model: gpt-4o-mini
+        tier: advanced
+        weight: 100
+      - provider: deepseek
+        model: deepseek-chat
+        tier: standard
+        weight: 100
+      - provider: qwen
+        model: qwen-plus
+        tier: standard
+        weight: 100
+
+  cheap-chat:
+    strategy: priority
+    fallback:
+      enabled: true
+      max_attempts: 2
+      on_status: [429, 500, 502, 503, 504]
+      on_timeout: true
+      on_connect_error: true
+      allow_downgrade: true
+    providers:
+      - provider: deepseek
+        model: deepseek-chat
+        tier: standard
+        weight: 100
+      - provider: qwen
+        model: qwen-plus
+        tier: standard
+        weight: 100
+
+circuit_breaker:
+  enabled: true
+  window: 60s
+  min_requests: 10
+  error_rate_threshold: 0.5
+  open_duration: 30s
+  half_open_requests: 3
+
+metrics:
+  prometheus:
+    enabled: true
+    path: /metrics
+
+storage:
+  enabled: true
+  path: "data/apiproxy.db"
+
+admin:
+  enabled: true
+  listen: ":8081"
+
+logging:
+  level: info
+  format: json

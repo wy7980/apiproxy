@@ -5,6 +5,7 @@
 ## 目标
 
 - **统一接入**: Agent 只调用 apiproxy 的 OpenAI 兼容 API,由 apiproxy 路由到 OpenAI / DeepSeek / Qwen 等。
+- **Anthropic 透明转发**: `/v1/messages` 透传 Anthropic 原生协议(供 Claude Code 等客户端使用),不做任何格式转换,上游负责模型适配与协议处理。
 - **实时监控**: Prometheus 指标 + JSON 结构化日志,覆盖延迟、首 token 时延、token 用量、错误率、fallback 次数。
 - **自动 fallback**: 超时 / 429 / 5xx / 连接错误时按优先级 fallback 到下一个 provider。
 - **熔断**: 按 provider 维度的简单熔断状态机(默认未启用自动切换)。
@@ -19,10 +20,10 @@ apiproxy/
   internal/
     server/             HTTP server + 路由 + handler
     config/             YAML 配置加载 + 默认值 + 校验
-    api/                OpenAI 兼容请求解析
+    api/                OpenAI / Anthropic 请求的最小解析与错误格式
     router/             路由策略(priority / weighted / latency ...)
     fallback/           fallback 决策
-    provider/           provider 抽象 + openai adapter
+    provider/           provider 抽象 + openai / anthropic adapters
     breaker/            简单熔断状态机
     metrics/            Prometheus 指标
     log/                slog 日志初始化
@@ -43,6 +44,7 @@ go mod tidy
 export OPENAI_API_KEY=sk-xxx
 export DEEPSEEK_API_KEY=sk-xxx
 export DASHSCOPE_API_KEY=sk-xxx
+export ANTHROPIC_API_KEY=sk-ant-xxx
 
 # 启动
 go run ./cmd/apiproxy -config configs/apiproxy.yaml
@@ -72,6 +74,22 @@ curl -N http://localhost:8080/v1/chat/completions \
     "messages": [{"role":"user","content":"hello"}]
   }'
 ```
+
+Anthropic `/v1/messages` 透明转发(用 route 名当 model):
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: demo-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-code",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"hello"}]
+  }'
+```
+
+`/v1/messages` 不做 Anthropic/OpenAI 格式转换，只替换 `model` 字段并将请求体和响应体原样透传到 `type: anthropic` provider。
 
 查看指标:
 
@@ -283,6 +301,6 @@ routes:
 - [x] CLI stats 子命令（表格 + JSON + 时间序列）
 - [ ] 加权 / 低延迟 / 健康优先路由
 - [ ] 自动熔断触发(目前仅有状态机)
-- [ ] Anthropic `/v1/messages` 原生协议
+- [x] Anthropic `/v1/messages` 透明转发（不做格式转换）
 - [ ] 成本估算 / 审计日志
 - [ ] OpenTelemetry tracing

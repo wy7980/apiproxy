@@ -36,6 +36,22 @@ providers:
     timeout: 60s
     tier: standard
 
+  # Anthropic provider for /v1/messages (Claude Code, Anthropic clients).
+  # base_url is the bare host — the provider adds /v1/messages automatically.
+  anthropic:
+    type: anthropic
+    # Official Anthropic: https://api.anthropic.com
+    # new-api / one-api gateways can also be used here; /v1 and /v1/messages
+    # suffixes are accepted and normalized automatically.
+    base_url: "https://api.anthropic.com"
+    api_key_env: "ANTHROPIC_API_KEY"
+    api_key: ""
+    # Official Anthropic uses x-api-key. Many new-api/one-api gateways use
+    # Authorization: Bearer instead; set auth_header: authorization for those.
+    auth_header: x-api-key
+    timeout: 120s
+    tier: advanced
+
 routes:
   smart-chat:
     strategy: priority
@@ -77,6 +93,23 @@ routes:
       - provider: qwen
         model: qwen-plus
         tier: standard
+        weight: 100
+
+  # Anthropic /v1/messages route (transparent proxy — no format conversion).
+  # Claude Code and other Anthropic clients hit /v1/messages with this model
+  # name and are forwarded verbatim to the Anthropic-compatible upstream.
+  claude-code:
+    strategy: priority
+    fallback:
+      enabled: true
+      max_attempts: 2
+      on_status: [429, 500, 502, 503, 504, 529]
+      on_timeout: true
+      on_connect_error: true
+    providers:
+      - provider: anthropic
+        model: claude-sonnet-4-5-20250929
+        tier: advanced
         weight: 100
 
 circuit_breaker:

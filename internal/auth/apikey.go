@@ -25,3 +25,15 @@ func (ks *KeyStore) Authenticate(r *http.Request) (clientID string, ok bool) {
 	id, found := ks.keys[key]
 	return id, found
 }
+
+// AuthenticateAnthropic extracts the API key from the Anthropic-style
+// x-api-key header. Used by the /v1/messages endpoint where Claude Code
+// and other Anthropic clients send authentication.
+func (ks *KeyStore) AuthenticateAnthropic(r *http.Request) (clientID string, ok bool) {
+	key := r.Header.Get("x-api-key")
+	if key == "" {
+		return "", false
+	}
+	id, found := ks.keys[key]
+	return id, found
+}

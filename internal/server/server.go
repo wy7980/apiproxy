@@ -22,6 +22,7 @@ import (
 	"github.com/wangyong/apiproxy/internal/fallback"
 	"github.com/wangyong/apiproxy/internal/metrics"
 	"github.com/wangyong/apiproxy/internal/provider"
+	"github.com/wangyong/apiproxy/internal/provider/anthropic"
 	"github.com/wangyong/apiproxy/internal/provider/openai"
 	"github.com/wangyong/apiproxy/internal/router"
 	"github.com/wangyong/apiproxy/internal/storage"
@@ -51,6 +52,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 				BaseURL: p.BaseURL,
 				APIKey:  apiKey,
 				Timeout: p.Timeout,
+			}, httpClient)
+		case "anthropic":
+			httpClient := &http.Client{Timeout: p.Timeout}
+			providers[name] = anthropic.New(provider.Config{
+				Name:       name,
+				BaseURL:    p.BaseURL,
+				APIKey:     apiKey,
+				Timeout:    p.Timeout,
+				AuthHeader: p.AuthHeader,
 			}, httpClient)
 		default:
 			return nil, fmt.Errorf("unsupported provider type %q for %q", p.Type, name)
@@ -99,6 +109,8 @@ func (s *Server) Routes() http.Handler {
 	}
 
 	mux.HandleFunc("/v1/chat/completions", s.withMiddleware(s.handleChatCompletions))
+	mux.HandleFunc("/v1/messages", s.withMiddleware(s.handleMessages))
+	mux.HandleFunc("/v1/messages/", s.withMiddleware(s.handleMessages))
 	mux.HandleFunc("/v1/models", s.withMiddleware(s.handleModels))
 
 	return mux
@@ -109,7 +121,11 @@ func (s *Server) withMiddleware(h http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("X-Apiproxy", "1")
 		clientID := "anonymous"
 		if s.cfg.Auth.Enabled {
+			// Try OpenAI-style Bearer auth, then fall back to Anthropic-style x-api-key.
 			id, ok := s.authStore.Authenticate(r)
+			if !ok {
+				id, ok = s.authStore.AuthenticateAnthropic(r)
+			}
 			if !ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
 					"error": map[string]any{
@@ -203,7 +219,7 @@ func (s *Server) handleNonStream(
 		if !ok {
 			continue
 		}
-		if !s.breaker.Allow(target.Provider) {
+		if !s.breaker.Allow(breakerKey(target.Provider, target.Model)) {
 			lastErr = &provider.Error{Kind: provider.KindServerError, Message: "circuit open", StatusCode: 503}
 			continue
 		}
@@ -321,7 +337,7 @@ func (s *Server) handleStream(
 		if !ok {
 			continue
 		}
-		if !s.breaker.Allow(target.Provider) {
+		if !s.breaker.Allow(breakerKey(target.Provider, target.Model)) {
 			continue
 		}
 
@@ -459,6 +475,413 @@ func (s *Server) handleStream(
 	writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "all providers failed for stream")
 }
 
+// ---------- Anthropic /v1/messages handler (transparent proxy) ----------
+
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+
+	clientID := clientIDFromContext(r.Context())
+	requestID := newRequestID()
+	start := time.Now()
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	// Debug: log the full inbound request from Claude Code (headers + body).
+	s.logger.Debug("anthropic client request",
+		"request_id", requestID, "client_id", clientID,
+		"client_method", r.Method, "client_path", r.URL.Path,
+		"client_headers", redactHeaders(r.Header),
+		"client_body", truncStr(string(body), maxLogBody))
+
+	// Parse just enough to route: model and stream flag.
+	parsed, err := api.ParseAnthropicMessagesRequest(body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	resolved, err := s.router.Resolve(parsed.Model)
+	if err != nil {
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
+		return
+	}
+
+	if parsed.Stream {
+		s.handleAnthropicStream(w, r, requestID, clientID, resolved, body, start)
+		return
+	}
+	s.handleAnthropicNonStream(w, r, requestID, clientID, resolved, body, start)
+}
+
+// handleAnthropicNonStream runs the fallback chain for Anthropic non-streaming
+// requests. The request body is forwarded verbatim — no format conversion.
+func (s *Server) handleAnthropicNonStream(
+	w http.ResponseWriter, r *http.Request,
+	requestID, clientID string,
+	resolved *router.ResolvedRoute,
+	body []byte,
+	start time.Time,
+) {
+	targets := resolved.OrderedTargets()
+	maxAttempts := resolved.Fallback.MaxAttempts
+	if maxAttempts <= 0 || maxAttempts > len(targets) {
+		maxAttempts = len(targets)
+	}
+
+	var lastErr *provider.Error
+	var fallbackFrom, fallbackTo string
+
+	for i := 0; i < maxAttempts; i++ {
+		target := targets[i]
+		prov, ok := s.providers[target.Provider]
+		if !ok {
+			continue
+		}
+		if !s.breaker.Allow(breakerKey(target.Provider, target.Model)) {
+			lastErr = &provider.Error{Kind: provider.KindServerError, Message: "circuit open", StatusCode: 503}
+			continue
+		}
+
+		// Rewrite the model name in the body so the upstream gets the right model.
+		upstreamBody, err := api.ReplaceModel(body, target.Model)
+		if err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: false}
+		resp, perr := prov.Chat(ctx, chReq)
+		cancel()
+
+		if i > 0 && fallbackFrom == "" {
+			fallbackFrom = targets[0].Provider + ":" + targets[0].Model
+		}
+
+		if perr == nil && resp.Err == nil {
+			fallbackTo = target.Provider + ":" + target.Model
+			// Transparent: forward the upstream response as-is.
+			for k, v := range resp.Header {
+				if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+					continue
+				}
+				w.Header()[k] = v
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Request-Id", requestID)
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(resp.Body)
+
+			s.logger.Debug("anthropic proxy downstream response (non-stream)",
+				"request_id", requestID, "client_id", clientID,
+				"provider", target.Provider, "model", target.Model,
+				"status", resp.StatusCode, "body_bytes", len(resp.Body),
+				"resp_body", truncStr(string(resp.Body), maxLogBody))
+
+			metrics.RecordRequest(metrics.RequestLog{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       resp.StatusCode,
+				LatencyMs:        float64(time.Since(start).Milliseconds()),
+				PromptTokens:     resp.Usage.PromptTokens,
+				CompletionTokens: resp.Usage.CompletionTokens,
+				TotalTokens:      resp.Usage.TotalTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           false,
+			})
+			s.recordEvent(storage.Event{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       resp.StatusCode,
+				LatencyMs:        float64(time.Since(start).Milliseconds()),
+				PromptTokens:     resp.Usage.PromptTokens,
+				CompletionTokens: resp.Usage.CompletionTokens,
+				TotalTokens:      resp.Usage.TotalTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           false,
+			})
+			return
+		}
+
+		if perr != nil {
+			lastErr = &provider.Error{Kind: provider.KindConnectError, Message: perr.Error(), Cause: perr}
+		} else {
+			lastErr = resp.Err
+		}
+
+		if !fallback.ShouldFallback(resolved.Fallback, lastErr) {
+			break
+		}
+	}
+
+	statusCode := http.StatusBadGateway
+	errType := "api_error"
+	errMsg := "all providers failed"
+	if lastErr != nil {
+		if lastErr.StatusCode != 0 {
+			statusCode = lastErr.StatusCode
+		}
+		errMsg = lastErr.Message
+		switch lastErr.Kind {
+		case provider.KindRateLimited:
+			errType = "rate_limit_error"
+		case provider.KindTimeout:
+			errType = "timeout_error"
+		case provider.KindConnectError:
+			errType = "connection_error"
+		}
+	}
+	writeAnthropicError(w, statusCode, errType, errMsg)
+}
+
+// handleAnthropicStream proxies a streaming Anthropic response.
+// SSE chunks from the upstream Anthropic provider are forwarded verbatim —
+// no OpenAI→Anthropic format conversion.
+func (s *Server) handleAnthropicStream(
+	w http.ResponseWriter, r *http.Request,
+	requestID, clientID string,
+	resolved *router.ResolvedRoute,
+	body []byte,
+	start time.Time,
+) {
+	targets := resolved.OrderedTargets()
+	maxAttempts := resolved.Fallback.MaxAttempts
+	if maxAttempts <= 0 || maxAttempts > len(targets) {
+		maxAttempts = len(targets)
+	}
+
+	var firstTokenTime time.Time
+	var fallbackFrom, fallbackTo string
+	var inputTokens, outputTokens int
+
+	for i := 0; i < maxAttempts; i++ {
+		target := targets[i]
+		prov, ok := s.providers[target.Provider]
+		if !ok {
+			continue
+		}
+		if !s.breaker.Allow(breakerKey(target.Provider, target.Model)) {
+			continue
+		}
+
+		upstreamBody, err := api.ReplaceModel(body, target.Model)
+		if err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
+		ch, perr := prov.ChatStream(ctx, chReq)
+
+		if perr != nil {
+			cancel()
+			s.logger.Warn("stream open failed",
+				"request_id", requestID, "provider", target.Provider, "err", perr.Error())
+			if i == 0 {
+				fallbackFrom = target.Provider + ":" + target.Model
+			}
+			continue
+		}
+
+		// Do not write the downstream 200 until the first upstream SSE chunk
+		// arrives. Some broken gateways return HTTP 200 with an empty body; if we
+		// forwarded that as-is, Claude Code reports "empty or malformed response".
+		flusher, _ := w.(http.Flusher)
+
+		fallbackTo = target.Provider + ":" + target.Model
+		var streamFailed bool
+		var wroteHeader bool
+
+		for chunk := range ch {
+			if chunk.Err != nil {
+				streamFailed = true
+				s.logger.Warn("stream chunk error",
+					"request_id", requestID, "provider", target.Provider, "err", chunk.Err.Error())
+				break
+			}
+			if !wroteHeader {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("X-Request-Id", requestID)
+				w.WriteHeader(http.StatusOK)
+				wroteHeader = true
+			}
+			if firstTokenTime.IsZero() {
+				firstTokenTime = time.Now()
+			}
+			// Extract usage from Anthropic SSE events (message_start / message_delta).
+			inputTokens, outputTokens = maybeExtractUsageAnthropic(chunk.Data, inputTokens, outputTokens)
+			_, _ = w.Write(chunk.Data)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		cancel()
+
+		if !wroteHeader && !streamFailed {
+			s.logger.Warn("anthropic upstream stream returned HTTP 200 with no SSE chunks",
+				"request_id", requestID, "provider", target.Provider, "model", target.Model)
+			lastErr := &provider.Error{Kind: provider.KindServerError, StatusCode: http.StatusBadGateway, Message: "upstream returned empty stream"}
+			if !fallback.ShouldFallback(resolved.Fallback, lastErr) {
+				writeAnthropicError(w, http.StatusBadGateway, "api_error", lastErr.Message)
+				return
+			}
+			continue
+		}
+
+		if !streamFailed {
+			latMs := float64(time.Since(start).Milliseconds())
+			ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
+			metrics.RecordRequest(metrics.RequestLog{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       http.StatusOK,
+				LatencyMs:        latMs,
+				FirstTokenMs:     ftMs,
+				PromptTokens:     inputTokens,
+				CompletionTokens: outputTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           true,
+			})
+			s.recordEvent(storage.Event{
+				RequestID:        requestID,
+				ClientID:         clientID,
+				Route:            resolved.Name,
+				Provider:         target.Provider,
+				Model:            target.Model,
+				StatusCode:       http.StatusOK,
+				LatencyMs:        latMs,
+				FirstTokenMs:     ftMs,
+				PromptTokens:     inputTokens,
+				CompletionTokens: outputTokens,
+				FallbackCount:    i,
+				FallbackFrom:     fallbackFrom,
+				FallbackTo:       fallbackTo,
+				Stream:           true,
+			})
+			return
+		}
+
+		// Stream failed mid-way: we already wrote a 200, so we cannot fallback.
+		latMs := float64(time.Since(start).Milliseconds())
+		ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
+		metrics.RecordRequest(metrics.RequestLog{
+			RequestID:        requestID,
+			ClientID:         clientID,
+			Route:            resolved.Name,
+			Provider:         target.Provider,
+			Model:            target.Model,
+			StatusCode:       http.StatusOK,
+			LatencyMs:        latMs,
+			FirstTokenMs:     ftMs,
+			PromptTokens:     inputTokens,
+			CompletionTokens: outputTokens,
+			FallbackCount:    i,
+			FallbackFrom:     fallbackFrom,
+			FallbackTo:       fallbackTo,
+			Stream:           true,
+			ErrorType:        "stream_error",
+		})
+		s.recordEvent(storage.Event{
+			RequestID:        requestID,
+			ClientID:         clientID,
+			Route:            resolved.Name,
+			Provider:         target.Provider,
+			Model:            target.Model,
+			StatusCode:       http.StatusOK,
+			LatencyMs:        latMs,
+			FirstTokenMs:     ftMs,
+			PromptTokens:     inputTokens,
+			CompletionTokens: outputTokens,
+			FallbackCount:    i,
+			FallbackFrom:     fallbackFrom,
+			FallbackTo:       fallbackTo,
+			Stream:           true,
+			ErrorType:        "stream_error",
+		})
+		return
+	}
+
+	writeAnthropicError(w, http.StatusBadGateway, "api_error", "all providers failed for stream")
+}
+
+// writeAnthropicError writes an Anthropic-format error response.
+func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(api.AnthropicErrorJSON(errType, msg))
+}
+
+// maybeExtractUsageAnthropic extracts usage from Anthropic SSE chunks.
+// Anthropic reports usage as { "usage": { "input_tokens": N, "output_tokens": M } }
+// in message_start and message_delta events.
+func maybeExtractUsageAnthropic(chunk []byte, input, output int) (int, int) {
+	if bytes.Index(chunk, []byte("\"usage\"")) < 0 {
+		return input, output
+	}
+	// Find JSON data within the SSE chunk.
+	dataStart := bytes.Index(chunk, []byte("data: "))
+	if dataStart < 0 {
+		return input, output
+	}
+	payload := chunk[dataStart+6:]
+	if n := bytes.Index(payload, []byte("\n")); n >= 0 {
+		payload = payload[:n]
+	}
+	payload = bytes.TrimSpace(payload)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return input, output
+	}
+	var parsed struct {
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(payload, &parsed) != nil {
+		return input, output
+	}
+	if parsed.Usage.InputTokens > 0 {
+		input = parsed.Usage.InputTokens
+	}
+	if parsed.Usage.OutputTokens > 0 {
+		output += parsed.Usage.OutputTokens
+	}
+	return input, output
+}
+
+// breakerKey is the circuit-breaker granularity key. Breaking on
+// provider+model means a single downed model does not trip the breaker for
+// other models served by the same provider (e.g. model A failing on a
+// provider should still allow model B on that provider to serve traffic).
+func breakerKey(provider, model string) string {
+	return provider + "|" + model
+}
+
 func (s *Server) recordEvent(e storage.Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -550,6 +973,33 @@ func maybeExtractUsage(chunk []byte, prompt, completion int) (int, int) {
 		completion = parsed.Usage.CompletionTokens
 	}
 	return prompt, completion
+}
+
+// ---------- debug logging helpers ----------
+
+const (
+	maxLogBody = 4096
+)
+
+func redactHeaders(h http.Header) map[string]string {
+	const masked = "***REDACTED***"
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		switch strings.ToLower(k) {
+		case "authorization", "x-api-key", "cookie", "set-cookie", "anthropic-auth-token":
+			out[k] = masked
+		default:
+			out[k] = strings.Join(vs, ", ")
+		}
+	}
+	return out
+}
+
+func truncStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + fmt.Sprintf("...(%d more bytes)", len(s)-n)
 }
 
 func buildAuthStore(cfg *config.Config) *auth.KeyStore {

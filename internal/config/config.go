@@ -39,12 +39,16 @@ type APIKey struct {
 }
 
 type Provider struct {
-	Type      string        `yaml:"type"`
-	BaseURL   string        `yaml:"base_url"`
-	APIKey    string        `yaml:"api_key"`
-	APIKeyEnv string        `yaml:"api_key_env"`
-	Timeout   time.Duration `yaml:"timeout"`
-	Tier      string        `yaml:"tier"`
+	Type       string        `yaml:"type"`
+	BaseURL    string        `yaml:"base_url"`
+	APIKey     string        `yaml:"api_key"`
+	APIKeyEnv  string        `yaml:"api_key_env"`
+	Timeout    time.Duration `yaml:"timeout"`
+	Tier       string        `yaml:"tier"`
+	// AuthHeader controls how the API key is sent upstream for protocol-native
+	// (anthropic) providers. "x-api-key" (default), "authorization", or "both".
+	// Useful for gateways (new-api/one-api) that only accept Bearer auth.
+	AuthHeader string `yaml:"auth_header"`
 }
 
 type Route struct {

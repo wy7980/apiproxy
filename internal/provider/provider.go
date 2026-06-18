@@ -10,8 +10,16 @@ import (
 
 // ChatRequest is the normalized request passed to a provider.
 type ChatRequest struct {
-	// Raw body as sent by the client. OpenAI-compatible providers forward it as-is.
+	// Raw body as sent by the client. Providers forward it as-is unless the server
+	// has already rewritten routing-only fields such as model.
 	Body []byte
+
+	// Header contains selected client request headers that protocol-native
+	// providers may need to forward (for example Anthropic-Version/Beta).
+	Header http.Header
+
+	// Path is the original downstream request path and query string.
+	Path string
 
 	// Model is the upstream model name to call.
 	Model string
@@ -98,10 +106,13 @@ type HTTPDoer interface {
 
 // Config holds the per-provider configuration.
 type Config struct {
-	Name    string
-	BaseURL string
-	APIKey  string
-	Timeout time.Duration
+	Name       string
+	BaseURL    string
+	APIKey     string
+	Timeout    time.Duration
+	// AuthHeader controls how APIKey is sent upstream for protocol-native
+	// providers (anthropic). "x-api-key" (default), "authorization", or "both".
+	AuthHeader string
 }
 
 // readAllAndClose is a small helper.

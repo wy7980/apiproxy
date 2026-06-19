@@ -111,7 +111,7 @@ func main() {
 		if store == nil {
 			logger.Warn("admin server enabled but storage is disabled; dashboard will not show data")
 		} else {
-			admin := admin.New(store, logger, configPath, srv)
+			admin := admin.New(store, logger, configPath, srv, "admin", "skyeye@2026")
 			adminSrv = &http.Server{
 				Addr:              cfg.Admin.Listen,
 				Handler:           admin.Handler(),

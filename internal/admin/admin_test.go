@@ -41,7 +41,23 @@ func setupServer(t *testing.T) (*Server, *storage.Store) {
 		}
 	}
 
-	return New(store, slog.Default(), "", nil), store
+	return New(store, slog.Default(), "", nil, "admin", "test-pass"), store
+}
+
+// loginCookie performs a POST /login with valid credentials and returns the
+// Set-Cookie value sent back by the server, for use as the Cookie header in
+// subsequent requests.
+func loginCookie(t *testing.T, srv *Server) string {
+	t.Helper()
+	form := strings.NewReader("username=admin&password=test-pass")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303", w.Code)
+	}
+	return w.Result().Header.Get("Set-Cookie")
 }
 
 func TestIndexHTML(t *testing.T) {
@@ -49,6 +65,7 @@ func TestIndexHTML(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -66,6 +83,7 @@ func TestIndexNotFound(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/random/path", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -79,6 +97,7 @@ func TestSummary(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/summary?start=-1h", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -99,6 +118,7 @@ func TestTimeseries(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/timeseries?start=-1h&interval=minute", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -116,6 +136,7 @@ func TestBuckets(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/buckets?start=-1h", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -129,6 +150,7 @@ func TestFilters(t *testing.T) {
 	defer store.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/filters", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -190,9 +212,9 @@ func TestParseTimeInvalid(t *testing.T) {
 
 // mockReloader implements admin.Reloader for testing config API.
 type mockReloader struct {
-	mu   sync.Mutex
-	cfg  *config.Config
-	err  error // error to return on next Reload call
+	mu  sync.Mutex
+	cfg *config.Config
+	err error // error to return on next Reload call
 }
 
 func (m *mockReloader) Reload(cfg *config.Config) error {
@@ -217,8 +239,8 @@ func testReloaderConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{Listen: ":0"},
 		Providers: map[string]config.Provider{
-			"openai":    {Type: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-real-key-123", Timeout: 60 * time.Second},
-			"deepseek":  {Type: "openai", BaseURL: "https://api.deepseek.com/v1", APIKeyEnv: "DEEPSEEK_KEY", Timeout: 60 * time.Second},
+			"openai":   {Type: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-real-key-123", Timeout: 60 * time.Second},
+			"deepseek": {Type: "openai", BaseURL: "https://api.deepseek.com/v1", APIKeyEnv: "DEEPSEEK_KEY", Timeout: 60 * time.Second},
 		},
 		Routes: map[string]config.Route{
 			"chat": {
@@ -248,7 +270,7 @@ func setupConfigServer(t *testing.T) (*Server, *mockReloader, string) {
 	}
 
 	reloader := &mockReloader{cfg: testReloaderConfig()}
-	srv := New(store, slog.Default(), cfgPath, reloader)
+	srv := New(store, slog.Default(), cfgPath, reloader, "admin", "test-pass")
 	return srv, reloader, cfgPath
 }
 
@@ -256,6 +278,7 @@ func TestGETConfig_MasksKeys(t *testing.T) {
 	srv, _, _ := setupConfigServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -315,6 +338,7 @@ func TestPUTConfig_PreservesMaskedKey(t *testing.T) {
 	body, _ := json.Marshal(payload)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -363,6 +387,7 @@ func TestPUTConfig_RejectsInvalid(t *testing.T) {
 	body, _ := json.Marshal(payload)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
+	req.Header.Set("Cookie", loginCookie(t, srv))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -377,5 +402,144 @@ func TestPUTConfig_RejectsInvalid(t *testing.T) {
 	}
 	if string(newYAML) != string(origYAML) {
 		t.Fatal("YAML file should be unchanged after invalid config")
+	}
+}
+
+func TestUnauthenticatedRedirectsToLogin(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	loc := w.Result().Header.Get("Location")
+	if !strings.HasPrefix(loc, "/login") {
+		t.Fatalf("location = %q, want /login...", loc)
+	}
+}
+
+func TestUnauthenticatedAPIReturns401(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/summary?start=-1h", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestLoginGETRendersForm(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "name=\"username\"") || !strings.Contains(body, "name=\"password\"") {
+		t.Fatal("login form missing required fields")
+	}
+}
+
+func TestLoginPOSTInvalidShowsError(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	form := strings.NewReader("username=admin&password=wrong")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "账号或密码错误") {
+		t.Fatalf("body should contain error message, got: %s", body)
+	}
+}
+
+func TestLoginPOSTValidSetsCookieAndRedirects(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	form := strings.NewReader("username=admin&password=test-pass&next=/api/summary")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if loc := w.Result().Header.Get("Location"); loc != "/api/summary" {
+		t.Fatalf("location = %q, want /api/summary", loc)
+	}
+	cookie := w.Result().Header.Get("Set-Cookie")
+	if !strings.HasPrefix(cookie, "apiproxy_admin=") {
+		t.Fatalf("Set-Cookie = %q, want apiproxy_admin=...", cookie)
+	}
+}
+
+func TestLoginRejectsOpenRedirect(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	form := strings.NewReader("username=admin&password=test-pass&next=https://evil.example/")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if loc := w.Result().Header.Get("Location"); loc != "/" {
+		t.Fatalf("location = %q, want / (open redirect blocked)", loc)
+	}
+}
+
+func TestLogoutClearsCookieAndRedirects(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	// After logout, the response must clear the apiproxy_admin cookie and
+	// redirect to /login. We test the response contract; the cleared cookie
+	// is what causes subsequent unauthenticated requests to redirect.
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Header.Set("Cookie", loginCookie(t, srv))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("logout status = %d, want 303", w.Code)
+	}
+	if loc := w.Result().Header.Get("Location"); loc != "/login" {
+		t.Fatalf("location = %q, want /login", loc)
+	}
+	cookie := w.Result().Header.Get("Set-Cookie")
+	if !strings.Contains(cookie, "apiproxy_admin=") || !strings.Contains(cookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie should clear apiproxy_admin, got: %q", cookie)
+	}
+
+	// Simulate the browser honoring the Set-Cookie: subsequent request
+	// has no apiproxy_admin cookie → must redirect to /login.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("post-logout status = %d, want 303 (redirect to login)", w.Code)
 	}
 }

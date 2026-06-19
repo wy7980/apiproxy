@@ -4,12 +4,19 @@ package admin
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,18 +41,32 @@ type Server struct {
 	mux        *http.ServeMux
 	configPath string
 	reloader   Reloader
+
+	username string
+	password string
+	token    []byte // HMAC key for signing session cookies
 }
 
 // New constructs an admin server bound to the given SQLite store and config
 // reloader. configPath is the YAML file path used for atomic config writes.
-func New(store *storage.Store, logger *slog.Logger, configPath string, r Reloader) *Server {
+// username and password are the admin login credentials (single-user mode).
+func New(store *storage.Store, logger *slog.Logger, configPath string, r Reloader, username, password string) *Server {
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		panic("generate session token: " + err.Error())
+	}
 	s := &Server{
 		store:      store,
 		logger:     logger,
 		mux:        http.NewServeMux(),
 		configPath: configPath,
 		reloader:   r,
+		username:   username,
+		password:   password,
+		token:      token,
 	}
+	s.mux.HandleFunc("/login", s.handleLogin)
+	s.mux.HandleFunc("/logout", s.handleLogout)
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/api/summary", s.handleSummary)
 	s.mux.HandleFunc("/api/percentiles", s.handlePercentiles)
@@ -56,17 +77,27 @@ func New(store *storage.Store, logger *slog.Logger, configPath string, r Reloade
 	return s
 }
 
-// Handler returns the HTTP handler for the admin dashboard.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler returns the HTTP handler for the admin dashboard, wrapped with
+// session-based authentication middleware.
+func (s *Server) Handler() http.Handler { return s.authMiddleware(s.mux) }
 
 // ListenAndServe starts the admin HTTP server.
 func (s *Server) ListenAndServe(addr string) error {
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           s.mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return srv.ListenAndServe()
+}
+
+// safeRedirectPath returns p if it is a safe same-origin path (starts with "/"
+// and does not start with "//"), otherwise "/".
+func safeRedirectPath(p string) string {
+	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+		return "/"
+	}
+	return p
 }
 
 // parseFilter extracts query parameters into a storage.QueryFilter.
@@ -304,6 +335,109 @@ func (s *Server) handleFilters(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// ---- Authentication ----
+
+const sessionCookieName = "apiproxy_admin"
+
+// sessionToken returns a signed session value: base64(random32bytes) + HMAC.
+func (s *Server) sessionToken() string {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		panic("rand.Read for session: " + err.Error())
+	}
+	sig := hmacSign(s.token, raw)
+	return base64.RawStdEncoding.EncodeToString(raw) + "|" + base64.RawStdEncoding.EncodeToString(sig)
+}
+
+// validSession checks that the cookie value has a valid HMAC signature.
+func (s *Server) validSession(val string) bool {
+	parts := strings.SplitN(val, "|", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	sig, err := base64.RawStdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	expected := hmacSign(s.token, raw)
+	return subtle.ConstantTimeCompare(sig, expected) == 1
+}
+
+// authMiddleware wraps h, requiring a valid session cookie for all paths
+// except /login and /logout. Unauthenticated browser requests redirect to
+// /login; unauthenticated API requests return 401.
+func (s *Server) authMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
+			h.ServeHTTP(w, r)
+			return
+		}
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || !s.validSession(cookie.Value) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			dest := "/login"
+			if r.URL.Path != "/" {
+				dest += "?next=" + url.QueryEscape(r.URL.Path)
+			}
+			http.Redirect(w, r, dest, http.StatusSeeOther)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		next := html.EscapeString(r.URL.Query().Get("next"))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(strings.Replace(loginHTML, "%s", next, 1)))
+	case http.MethodPost:
+		user := r.FormValue("username")
+		pass := r.FormValue("password")
+		if subtle.ConstantTimeCompare([]byte(user), []byte(s.username)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) != 1 {
+			next := html.EscapeString(r.FormValue("next"))
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			page := strings.Replace(loginHTMLWithErr, "%s", "账号或密码错误", 1)
+			page = strings.Replace(page, "%s", next, 1)
+			_, _ = w.Write([]byte(page))
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    s.sessionToken(),
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		next := safeRedirectPath(r.FormValue("next"))
+		http.Redirect(w, r, next, http.StatusSeeOther)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -357,19 +491,19 @@ type configRouteProviderJSON struct {
 
 // configFallbackJSON is the wire format for fallback policy.
 type configFallbackJSON struct {
-	Enabled        bool    `json:"enabled"`
-	MaxAttempts    int     `json:"max_attempts"`
-	OnStatus       []int   `json:"on_status"`
-	OnTimeout      bool    `json:"on_timeout"`
-	OnConnectError bool    `json:"on_connect_error"`
-	AllowDowngrade bool    `json:"allow_downgrade"`
+	Enabled        bool  `json:"enabled"`
+	MaxAttempts    int   `json:"max_attempts"`
+	OnStatus       []int `json:"on_status"`
+	OnTimeout      bool  `json:"on_timeout"`
+	OnConnectError bool  `json:"on_connect_error"`
+	AllowDowngrade bool  `json:"allow_downgrade"`
 }
 
 // configRouteJSON is the wire format for a route entry.
 type configRouteJSON struct {
-	Name      string                  `json:"name"`
-	Strategy  string                  `json:"strategy"`
-	Fallback  configFallbackJSON      `json:"fallback"`
+	Name      string                    `json:"name"`
+	Strategy  string                    `json:"strategy"`
+	Fallback  configFallbackJSON        `json:"fallback"`
 	Providers []configRouteProviderJSON `json:"providers"`
 }
 
@@ -620,6 +754,13 @@ func toYAMLConfig(c *config.Config) *yamlConfig {
 // makes the YAML layout explicit and keeps us independent of future struct
 // changes to the yaml tags.
 type yamlConfig = config.Config
+
+// hmacSign returns the HMAC-SHA256 of data using key.
+func hmacSign(key, data []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write(data)
+	return m.Sum(nil)
+}
 
 // ErrStoreNotConfigured is returned when admin endpoints are hit before storage
 // has been wired up.

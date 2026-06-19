@@ -30,6 +30,7 @@ const dashboardHTML = `<!doctype html>
     }
     .header-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
     .header-actions button { width: auto; min-width: 88px; }
+    #logoutBtn { display: inline-block; margin-left: 10px; color: var(--muted); font-size: 13px; text-decoration: none; }
     h1 { margin: 0; font-size: 24px; }
     .subtitle { color: var(--muted); margin-top: 6px; }
     main { padding: 16px 28px 32px; }
@@ -134,6 +135,7 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="header-actions">
         <button id="configBtn">配置</button>
+        <a href="/logout" id="logoutBtn">退出</a>
       </div>
     </div>
   </header>

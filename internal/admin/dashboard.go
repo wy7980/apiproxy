@@ -76,7 +76,10 @@ const dashboardHTML = `<!doctype html>
     .table-wrap { overflow: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
-    th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+    table.summary-table th:first-child, table.summary-table td:first-child,
+    table.summary-table th:nth-child(2), table.summary-table td:nth-child(2),
+    table.summary-table th:nth-child(3), table.summary-table td:nth-child(3) { text-align: left; }
+    table.tokens-table th:first-child, table.tokens-table td:first-child { text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     .error { color: var(--danger); margin-top: 12px; display: none; }
     .muted { color: var(--muted); }
@@ -179,7 +182,7 @@ const dashboardHTML = `<!doctype html>
       <div class="card full">
         <h2>模型性能汇总</h2>
         <div class="table-wrap">
-          <table>
+          <table class="summary-table">
             <thead>
               <tr>
                 <th>Provider</th><th>Model</th><th>Route</th><th>请求</th><th>错误</th><th>成功率</th><th>平均延迟</th><th>P50</th><th>P95</th><th>P99</th><th>TPS</th><th>Prompt</th><th>Completion</th><th>Fallback</th>
@@ -188,6 +191,20 @@ const dashboardHTML = `<!doctype html>
             <tbody id="summaryBody"></tbody>
           </table>
         </div>
+      </div>
+      <div class="card full">
+        <h2>模型 Token 总量</h2>
+        <div class="table-wrap">
+          <table class="tokens-table">
+            <thead>
+              <tr>
+                <th>Model</th><th>输入 Prompt</th><th>输出 Completion</th><th>合计</th><th>输入占比</th><th>输出占比</th>
+              </tr>
+            </thead>
+            <tbody id="tokensBody"></tbody>
+          </table>
+        </div>
+        <canvas id="tokensChart" style="margin-top:14px"></canvas>
       </div>
       <div class="card">
         <h2>延迟趋势</h2>
@@ -400,6 +417,60 @@ function renderBuckets(rows) {
   upsertChart("tgChart", { type: "line", data: { labels: labels, datasets: tgDatasets }, options: { responsive: true, maintainAspectRatio: false } });
 }
 
+function fmtTokens(n) {
+  if (n === null || n === undefined) return "-";
+  n = Number(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+
+function renderTokens(rows) {
+  var map = new Map();
+  for (var i = 0; i < (rows || []).length; i++) {
+    var r = rows[i];
+    var key = (r.provider || "") + "/" + (r.model || "");
+    var cur = map.get(key) || { model: r.model, prompt: 0, completion: 0, total: 0 };
+    cur.prompt += Number(r.prompt_tokens) || 0;
+    cur.completion += Number(r.completion_tokens) || 0;
+    cur.total += Number(r.total_tokens) || 0;
+    map.set(key, cur);
+  }
+  var items = Array.from(map.values());
+  var grandTotal = 0;
+  for (var i = 0; i < items.length; i++) grandTotal += items[i].total;
+
+  var body = eid("tokensBody");
+  body.innerHTML = "";
+  if (items.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">当前筛选范围内没有数据</td></tr>';
+    return;
+  }
+  for (var i = 0; i < items.length; i++) {
+    var m = items[i];
+    var pPct = grandTotal > 0 ? (m.prompt / grandTotal * 100).toFixed(1) + "%" : "-";
+    var cPct = grandTotal > 0 ? (m.completion / grandTotal * 100).toFixed(1) + "%" : "-";
+    var tr = document.createElement("tr");
+    tr.innerHTML = td(m.model) + td(fmtTokens(m.prompt)) + td(fmtTokens(m.completion)) + td(fmtTokens(m.total)) + td(pPct) + td(cPct);
+    body.appendChild(tr);
+  }
+
+  var labels = items.map(function(m) { return m.model; });
+  var promptData = items.map(function(m) { return m.prompt; });
+  var completionData = items.map(function(m) { return m.completion; });
+  upsertChart("tokensChart", {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [
+        { label: "输入 Prompt", data: promptData, backgroundColor: "#315efb" },
+        { label: "输出 Completion", data: completionData, backgroundColor: "#12a87c" }
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: false }, y: { stacked: false, beginAtZero: true } } }
+  });
+}
+
 function refresh() {
   setError(null);
   var params = queryParams();
@@ -411,6 +482,7 @@ function refresh() {
     fetchJSON("/api/buckets", params),
   ]).then(function(results) {
     renderSummary(results[0] || []);
+    renderTokens(results[0] || []);
     renderTimeseries(results[1] || []);
     renderBuckets(results[2] || []);
   }).catch(function(err) {

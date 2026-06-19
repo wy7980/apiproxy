@@ -125,14 +125,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config file: %w", err)
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 	return &cfg, nil
 }
 
-func (c *Config) validate() error {
+// Validate checks the config for required fields and consistency.
+func (c *Config) Validate() error {
 	if c.Server.Listen == "" {
 		return fmt.Errorf("server.listen is required")
 	}
@@ -157,7 +158,8 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func (c *Config) applyDefaults() {
+// ApplyDefaults fills in zero-value fields with sane defaults.
+func (c *Config) ApplyDefaults() {
 	if c.Server.RequestTimeout == 0 {
 		c.Server.RequestTimeout = 120 * time.Second
 	}

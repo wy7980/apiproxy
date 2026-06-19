@@ -1,5 +1,5 @@
 // Package admin provides a separate HTTP server that serves a dashboard UI
-// and JSON API for inspecting recorded request statistics.
+// and JSON API for inspecting recorded request statistics and managing config.
 package admin
 
 import (
@@ -7,28 +7,44 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/wangyong/apiproxy/internal/config"
 	"github.com/wangyong/apiproxy/internal/storage"
+	"gopkg.in/yaml.v3"
 )
+
+// Reloader is the interface the admin server uses to hot-reload the proxy.
+type Reloader interface {
+	Reload(cfg *config.Config) error
+	CurrentConfig() *config.Config
+}
 
 // Server is the admin dashboard HTTP server.
 type Server struct {
-	store  *storage.Store
-	logger *slog.Logger
-	mux    *http.ServeMux
+	store      *storage.Store
+	logger     *slog.Logger
+	mux        *http.ServeMux
+	configPath string
+	reloader   Reloader
 }
 
-// New constructs an admin server bound to the given SQLite store.
-func New(store *storage.Store, logger *slog.Logger) *Server {
+// New constructs an admin server bound to the given SQLite store and config
+// reloader. configPath is the YAML file path used for atomic config writes.
+func New(store *storage.Store, logger *slog.Logger, configPath string, r Reloader) *Server {
 	s := &Server{
-		store:  store,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		store:      store,
+		logger:     logger,
+		mux:        http.NewServeMux(),
+		configPath: configPath,
+		reloader:   r,
 	}
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/api/summary", s.handleSummary)
@@ -36,6 +52,7 @@ func New(store *storage.Store, logger *slog.Logger) *Server {
 	s.mux.HandleFunc("/api/buckets", s.handleBuckets)
 	s.mux.HandleFunc("/api/timeseries", s.handleTimeseries)
 	s.mux.HandleFunc("/api/filters", s.handleFilters)
+	s.mux.HandleFunc("/api/config", s.handleConfigAPI)
 	return s
 }
 
@@ -295,6 +312,314 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(dashboardHTML))
 }
+
+// handleConfigAPI dispatches GET (read current config) and PUT (write + reload).
+func (s *Server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
+	if s.reloader == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "config management not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetConfig(w, r)
+	case http.MethodPut:
+		s.handlePutConfig(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// maskedAPIKey is the placeholder value sent to the UI for any provider with
+// a non-empty API key. On PUT, the server restores the real key when the UI
+// sends back the same placeholder.
+const maskedAPIKey = "***"
+
+// configProviderJSON is the wire format for provider entries in /api/config.
+type configProviderJSON struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	BaseURL    string `json:"base_url"`
+	APIKey     string `json:"api_key"`
+	APIKeyEnv  string `json:"api_key_env"`
+	AuthHeader string `json:"auth_header"`
+	Timeout    string `json:"timeout"`
+	Tier       string `json:"tier"`
+}
+
+// configRouteProviderJSON is the wire format for route provider targets.
+type configRouteProviderJSON struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Tier     string `json:"tier"`
+	Weight   int    `json:"weight"`
+}
+
+// configFallbackJSON is the wire format for fallback policy.
+type configFallbackJSON struct {
+	Enabled        bool    `json:"enabled"`
+	MaxAttempts    int     `json:"max_attempts"`
+	OnStatus       []int   `json:"on_status"`
+	OnTimeout      bool    `json:"on_timeout"`
+	OnConnectError bool    `json:"on_connect_error"`
+	AllowDowngrade bool    `json:"allow_downgrade"`
+}
+
+// configRouteJSON is the wire format for a route entry.
+type configRouteJSON struct {
+	Name      string                  `json:"name"`
+	Strategy  string                  `json:"strategy"`
+	Fallback  configFallbackJSON      `json:"fallback"`
+	Providers []configRouteProviderJSON `json:"providers"`
+}
+
+// configResponseJSON is the full wire format returned by GET /api/config.
+type configResponseJSON struct {
+	Providers []configProviderJSON `json:"providers"`
+	Routes    []configRouteJSON    `json:"routes"`
+}
+
+func (s *Server) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
+	cfg := s.reloader.CurrentConfig()
+	if cfg == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "no config loaded")
+		return
+	}
+
+	resp := configResponseJSON{}
+	for name, p := range cfg.Providers {
+		key := p.APIKey
+		if key == "" && p.APIKeyEnv != "" {
+			key = os.Getenv(p.APIKeyEnv)
+		}
+		display := ""
+		if key != "" {
+			display = maskedAPIKey
+		}
+		resp.Providers = append(resp.Providers, configProviderJSON{
+			Name:       name,
+			Type:       p.Type,
+			BaseURL:    p.BaseURL,
+			APIKey:     display,
+			APIKeyEnv:  p.APIKeyEnv,
+			AuthHeader: p.AuthHeader,
+			Timeout:    p.Timeout.String(),
+			Tier:       p.Tier,
+		})
+	}
+	for name, r := range cfg.Routes {
+		rt := configRouteJSON{
+			Name:     name,
+			Strategy: r.Strategy,
+			Fallback: configFallbackJSON{
+				Enabled:        r.Fallback.Enabled,
+				MaxAttempts:    r.Fallback.MaxAttempts,
+				OnStatus:       append([]int(nil), r.Fallback.OnStatus...),
+				OnTimeout:      r.Fallback.OnTimeout,
+				OnConnectError: r.Fallback.OnConnectError,
+				AllowDowngrade: r.Fallback.AllowDowngrade,
+			},
+		}
+		for _, t := range r.Providers {
+			rt.Providers = append(rt.Providers, configRouteProviderJSON{
+				Provider: t.Provider,
+				Model:    t.Model,
+				Tier:     t.Tier,
+				Weight:   t.Weight,
+			})
+		}
+		resp.Routes = append(resp.Routes, rt)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	var in configResponseJSON
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)) // 4 MiB limit
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	current := s.reloader.CurrentConfig()
+
+	// Build a new Config from the wire payload.
+	newCfg := config.Config{
+		Server:         current.Server,
+		Admin:          current.Admin,
+		Auth:           current.Auth,
+		CircuitBreaker: current.CircuitBreaker,
+		Metrics:        current.Metrics,
+		Logging:        current.Logging,
+		Storage:        current.Storage,
+		Providers:      map[string]config.Provider{},
+		Routes:         map[string]config.Route{},
+	}
+
+	for _, p := range in.Providers {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			writeJSONError(w, http.StatusBadRequest, "provider name is required")
+			return
+		}
+		timeout, err := time.ParseDuration(p.Timeout)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("provider %q: invalid timeout %q: %v", name, p.Timeout, err))
+			return
+		}
+		// Restore masked keys from the running config when unchanged.
+		key := p.APIKey
+		if key == maskedAPIKey {
+			key = current.ProviderAPIKey(name)
+		}
+		newCfg.Providers[name] = config.Provider{
+			Type:       p.Type,
+			BaseURL:    p.BaseURL,
+			APIKey:     key,
+			APIKeyEnv:  p.APIKeyEnv,
+			Timeout:    timeout,
+			Tier:       p.Tier,
+			AuthHeader: p.AuthHeader,
+		}
+	}
+
+	for _, rt := range in.Routes {
+		name := strings.TrimSpace(rt.Name)
+		if name == "" {
+			writeJSONError(w, http.StatusBadRequest, "route name is required")
+			return
+		}
+		r := config.Route{
+			Strategy: rt.Strategy,
+			Fallback: config.FallbackConfig{
+				Enabled:        rt.Fallback.Enabled,
+				MaxAttempts:    rt.Fallback.MaxAttempts,
+				OnStatus:       append([]int(nil), rt.Fallback.OnStatus...),
+				OnTimeout:      rt.Fallback.OnTimeout,
+				OnConnectError: rt.Fallback.OnConnectError,
+				AllowDowngrade: rt.Fallback.AllowDowngrade,
+			},
+		}
+		for _, t := range rt.Providers {
+			r.Providers = append(r.Providers, config.RouteTarget{
+				Provider: t.Provider,
+				Model:    t.Model,
+				Tier:     t.Tier,
+				Weight:   t.Weight,
+			})
+		}
+		newCfg.Routes[name] = r
+	}
+
+	// Validate before touching disk.
+	if err := newCfg.Validate(); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	newCfg.ApplyDefaults()
+
+	// Marshal to YAML and write atomically (temp file + rename).
+	out, err := yaml.Marshal(toYAMLConfig(&newCfg))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "marshal config: "+err.Error())
+		return
+	}
+	if err := atomicWriteFile(s.configPath, out, 0o644); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "write config: "+err.Error())
+		return
+	}
+
+	// Re-load from disk to get the same parsing path as bootstrap.
+	fresh, err := config.Load(s.configPath)
+	if err != nil {
+		// Best effort: keep the running config intact.
+		writeJSONError(w, http.StatusInternalServerError, "reload parse failed (running config unchanged): "+err.Error())
+		return
+	}
+	if err := s.reloader.Reload(fresh); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "reload failed: "+err.Error())
+		return
+	}
+
+	s.logger.Info("config updated via admin API", "providers", len(newCfg.Providers), "routes", len(newCfg.Routes))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"message": "config reloaded",
+	})
+}
+
+// atomicWriteFile writes data to path via a temp file in the same directory,
+// then renames it into place. Rename is atomic on POSIX filesystems.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".cfg-*.yaml.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// Best effort cleanup if anything failed before rename.
+		if _, statErr := os.Stat(tmpName); statErr == nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// toYAMLConfig converts the runtime Config back into the YAML-friendly shape.
+// It preserves user-facing fields (api_key_env, auth_header, tier) and omits
+// empty API keys so the YAML file stays clean.
+func toYAMLConfig(c *config.Config) *yamlConfig {
+	out := &yamlConfig{
+		Server:         c.Server,
+		Admin:          c.Admin,
+		Auth:           c.Auth,
+		CircuitBreaker: c.CircuitBreaker,
+		Metrics:        c.Metrics,
+		Logging:        c.Logging,
+		Storage:        c.Storage,
+		Providers:      map[string]config.Provider{},
+		Routes:         map[string]config.Route{},
+	}
+	for name, p := range c.Providers {
+		out.Providers[name] = p
+	}
+	for name, r := range c.Routes {
+		out.Routes[name] = r
+	}
+	return out
+}
+
+// yamlConfig is a thin wrapper around config.Config with yaml tags that match
+// the on-disk layout. Embedding config.Config directly also works, but this
+// makes the YAML layout explicit and keeps us independent of future struct
+// changes to the yaml tags.
+type yamlConfig = config.Config
 
 // ErrStoreNotConfigured is returned when admin endpoints are hit before storage
 // has been wired up.

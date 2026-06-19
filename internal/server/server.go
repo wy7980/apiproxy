@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -28,17 +29,40 @@ import (
 	"github.com/wangyong/apiproxy/internal/storage"
 )
 
-type Server struct {
+// snapshot holds the immutable runtime state that is atomically swapped on
+// config reload. Each request handler loads the snapshot once at entry and
+// reads only from that snapshot — in-flight requests keep using the old one,
+// new requests pick up the new one.
+type snapshot struct {
 	cfg       *config.Config
-	logger    *slog.Logger
-	authStore *auth.KeyStore
 	router    *router.Router
-	breaker   *breaker.Breaker
+	authStore *auth.KeyStore
 	providers map[string]provider.Provider
-	store     storage.EventWriter
+}
+
+type Server struct {
+	snap    atomic.Pointer[snapshot]
+	logger  *slog.Logger
+	breaker *breaker.Breaker
+	store   storage.EventWriter
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
+	snap, err := buildSnapshot(cfg)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		logger:  logger,
+		breaker: breaker.New(),
+		store:   storage.NoopWriter{},
+	}
+	s.snap.Store(snap)
+	return s, nil
+}
+
+// buildSnapshot constructs an immutable snapshot from the given config.
+func buildSnapshot(cfg *config.Config) (*snapshot, error) {
 	authStore := buildAuthStore(cfg)
 
 	providers := make(map[string]provider.Provider, len(cfg.Providers))
@@ -67,15 +91,32 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		}
 	}
 
-	return &Server{
+	return &snapshot{
 		cfg:       cfg,
-		logger:    logger,
-		authStore: authStore,
 		router:    router.New(cfg.Routes),
-		breaker:   breaker.New(),
+		authStore: authStore,
 		providers: providers,
-		store:     storage.NoopWriter{},
 	}, nil
+}
+
+// Reload atomically swaps the runtime snapshot with one built from newCfg.
+// In-flight requests continue using the old snapshot; new requests pick up
+// the new one.
+func (s *Server) Reload(cfg *config.Config) error {
+	snap, err := buildSnapshot(cfg)
+	if err != nil {
+		return fmt.Errorf("build snapshot: %w", err)
+	}
+	s.snap.Store(snap)
+	s.logger.Info("config reloaded",
+		"providers", len(cfg.Providers),
+		"routes", len(cfg.Routes))
+	return nil
+}
+
+// CurrentConfig returns the config from the active snapshot.
+func (s *Server) CurrentConfig() *config.Config {
+	return s.snap.Load().cfg
 }
 
 // WithStore attaches a storage writer for durable request recording.
@@ -86,25 +127,30 @@ func (s *Server) WithStore(w storage.EventWriter) *Server {
 
 // NewWithProviders builds a Server using pre-constructed providers (for testing).
 func NewWithProviders(cfg *config.Config, logger *slog.Logger, provs map[string]provider.Provider) *Server {
-	return &Server{
+	snap := &snapshot{
 		cfg:       cfg,
-		logger:    logger,
-		authStore: buildAuthStore(cfg),
 		router:    router.New(cfg.Routes),
-		breaker:   breaker.New(),
+		authStore: buildAuthStore(cfg),
 		providers: provs,
-		store:     storage.NoopWriter{},
 	}
+	s := &Server{
+		logger:  logger,
+		breaker: breaker.New(),
+		store:   storage.NoopWriter{},
+	}
+	s.snap.Store(snap)
+	return s
 }
 
 func (s *Server) Routes() http.Handler {
+	snap := s.snap.Load()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 
-	if s.cfg.Metrics.Prometheus.Enabled {
-		path := s.cfg.Metrics.Prometheus.Path
+	if snap.cfg.Metrics.Prometheus.Enabled {
+		path := snap.cfg.Metrics.Prometheus.Path
 		mux.Handle(path, promhttp.Handler())
 	}
 
@@ -118,13 +164,14 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) withMiddleware(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		snap := s.snap.Load()
 		w.Header().Set("X-Apiproxy", "1")
 		clientID := "anonymous"
-		if s.cfg.Auth.Enabled {
+		if snap.cfg.Auth.Enabled {
 			// Try OpenAI-style Bearer auth, then fall back to Anthropic-style x-api-key.
-			id, ok := s.authStore.Authenticate(r)
+			id, ok := snap.authStore.Authenticate(r)
 			if !ok {
-				id, ok = s.authStore.AuthenticateAnthropic(r)
+				id, ok = snap.authStore.AuthenticateAnthropic(r)
 			}
 			if !ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
@@ -151,8 +198,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	models := make([]map[string]any, 0, len(s.cfg.Routes))
-	for name := range s.cfg.Routes {
+	snap := s.snap.Load()
+	models := make([]map[string]any, 0, len(snap.cfg.Routes))
+	for name := range snap.cfg.Routes {
 		models = append(models, map[string]any{
 			"id": name, "object": "model", "owned_by": "apiproxy",
 		})
@@ -182,7 +230,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolved, err := s.router.Resolve(parsed.Model)
+	snap := s.snap.Load()
+	resolved, err := snap.router.Resolve(parsed.Model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusNotFound, "model_not_found", err.Error())
 		return
@@ -215,7 +264,8 @@ func (s *Server) handleNonStream(
 
 	for i := 0; i < maxAttempts; i++ {
 		target := targets[i]
-		prov, ok := s.providers[target.Provider]
+	snap := s.snap.Load()
+		prov, ok := snap.providers[target.Provider]
 		if !ok {
 			continue
 		}
@@ -231,7 +281,7 @@ func (s *Server) handleNonStream(
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: false}
 		resp, perr := prov.Chat(ctx, chReq)
 		cancel()
@@ -333,7 +383,8 @@ func (s *Server) handleStream(
 
 	for i := 0; i < maxAttempts; i++ {
 		target := targets[i]
-		prov, ok := s.providers[target.Provider]
+	snap := s.snap.Load()
+		prov, ok := snap.providers[target.Provider]
 		if !ok {
 			continue
 		}
@@ -347,7 +398,7 @@ func (s *Server) handleStream(
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: true}
 		ch, perr := prov.ChatStream(ctx, chReq)
 
@@ -507,7 +558,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolved, err := s.router.Resolve(parsed.Model)
+	snap := s.snap.Load()
+	resolved, err := snap.router.Resolve(parsed.Model)
 	if err != nil {
 		writeAnthropicError(w, http.StatusNotFound, "not_found_error", err.Error())
 		return
@@ -540,7 +592,8 @@ func (s *Server) handleAnthropicNonStream(
 
 	for i := 0; i < maxAttempts; i++ {
 		target := targets[i]
-		prov, ok := s.providers[target.Provider]
+	snap := s.snap.Load()
+		prov, ok := snap.providers[target.Provider]
 		if !ok {
 			continue
 		}
@@ -556,7 +609,7 @@ func (s *Server) handleAnthropicNonStream(
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: false}
 		resp, perr := prov.Chat(ctx, chReq)
 		cancel()
@@ -673,7 +726,8 @@ func (s *Server) handleAnthropicStream(
 
 	for i := 0; i < maxAttempts; i++ {
 		target := targets[i]
-		prov, ok := s.providers[target.Provider]
+	snap := s.snap.Load()
+		prov, ok := snap.providers[target.Provider]
 		if !ok {
 			continue
 		}
@@ -687,7 +741,7 @@ func (s *Server) handleAnthropicStream(
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(target.Provider))
+		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
 		ch, perr := prov.ChatStream(ctx, chReq)
 
@@ -890,10 +944,10 @@ func (s *Server) recordEvent(e storage.Event) {
 	}
 }
 
-func (s *Server) providerTimeout(name string) time.Duration {
-	p, ok := s.cfg.Providers[name]
+func (s *Server) providerTimeout(snap *snapshot, name string) time.Duration {
+	p, ok := snap.cfg.Providers[name]
 	if !ok || p.Timeout == 0 {
-		return s.cfg.Server.RequestTimeout
+		return snap.cfg.Server.RequestTimeout
 	}
 	return p.Timeout
 }

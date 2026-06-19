@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -406,5 +408,140 @@ func TestAnthropicMessagesModelNotFound(t *testing.T) {
 	if errResp["type"] != "error" {
 		t.Fatalf("error type = %v", errResp["type"])
 	}
+}
+
+// ---------- Reload tests ----------
+
+// TestReload_SwapsProviders verifies that calling Reload with a new config
+// causes subsequent requests to be served by the newly-configured providers.
+// The config goes through the real buildSnapshot path (constructs openai/
+// anthropic providers via HTTP), so we cannot inject mocks — instead we
+// verify the proxy stops talking to the old provider. We do this by pointing
+// the new config at a provider whose HTTP server returns a distinctive body
+// and asserting the response matches.
+func TestReload_SwapsProviders(t *testing.T) {
+	// Upstream fake: counts requests and returns a stable body.
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"v2"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig()
+	// Initial server has no real providers wired (NewWithProviders with nil),
+	// so a chat request returns 4xx/5xx. After Reload with a config pointing
+	// at the test upstream, the same request should succeed.
+	srv := NewWithProviders(cfg, slog.Default(), nil)
+
+	// New config: single openai provider backed by the test upstream.
+	newCfg := &config.Config{
+		Server: config.ServerConfig{Listen: ":0", RequestTimeout: 30 * time.Second},
+		Auth:   config.AuthConfig{Enabled: true, APIKeys: []config.APIKey{{Key: "test-key", ClientID: "tester"}}},
+		Providers: map[string]config.Provider{
+			"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "ignored", Timeout: 5 * time.Second, Tier: "advanced"},
+		},
+		Routes: map[string]config.Route{
+			"chat": {
+				Strategy:  "priority",
+				Providers: []config.RouteTarget{{Provider: "p1", Model: "any"}},
+			},
+		},
+	}
+
+	if err := srv.Reload(newCfg); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// CurrentConfig must reflect the reloaded config.
+	if got := srv.CurrentConfig(); got != newCfg {
+		t.Fatalf("CurrentConfig did not update after Reload")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"chat","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Authorization", "Bearer test-key")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("post-reload chat status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if atomic.LoadInt32(&hits) == 0 {
+		t.Fatal("upstream was not hit after Reload — old provider snapshot may still be in use")
+	}
+}
+
+// TestReload_ConcurrentSafe fires many concurrent requests while calling
+// Reload midway. The snapshot is stored in an atomic.Pointer, so in-flight
+// requests should never observe a torn state and the server must not panic.
+func TestReload_ConcurrentSafe(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig()
+	srv := NewWithProviders(cfg, slog.Default(), nil)
+
+	// Reload to a valid config first so requests can succeed.
+	initial := &config.Config{
+		Server: config.ServerConfig{Listen: ":0", RequestTimeout: 30 * time.Second},
+		Auth:   config.AuthConfig{Enabled: true, APIKeys: []config.APIKey{{Key: "test-key", ClientID: "tester"}}},
+		Providers: map[string]config.Provider{
+			"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"},
+		},
+		Routes: map[string]config.Route{
+			"chat": {Strategy: "priority", Providers: []config.RouteTarget{{Provider: "p1", Model: "m1"}}},
+		},
+	}
+	if err := srv.Reload(initial); err != nil {
+		t.Fatalf("initial Reload: %v", err)
+	}
+
+	body := []byte(`{"model":"chat","messages":[{"role":"user","content":"hi"}]}`)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 50 goroutines hammering the server.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+				req.Header.Set("Authorization", "Bearer test-key")
+				w := httptest.NewRecorder()
+				srv.Routes().ServeHTTP(w, req)
+				// We don't assert on status — some requests may land during
+				// a reload window and that's fine. The point is no panic.
+				_ = w.Code
+			}
+		}()
+	}
+
+	// Reload repeatedly while requests are in flight.
+	for i := 0; i < 20; i++ {
+		next := &config.Config{
+			Server:    initial.Server,
+			Auth:      initial.Auth,
+			Providers: map[string]config.Provider{"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"}},
+			Routes:    map[string]config.Route{"chat": {Strategy: "priority", Providers: []config.RouteTarget{{Provider: "p1", Model: "m1"}}}},
+		}
+		if err := srv.Reload(next); err != nil {
+			t.Fatalf("Reload %d: %v", i, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	close(stop)
+	wg.Wait()
+	// If we got here without panicking, the test passes.
 }
 

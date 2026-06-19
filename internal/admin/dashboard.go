@@ -28,6 +28,8 @@ const dashboardHTML = `<!doctype html>
     header {
       padding: 20px 28px 8px;
     }
+    .header-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+    .header-actions button { width: auto; min-width: 88px; }
     h1 { margin: 0; font-size: 24px; }
     .subtitle { color: var(--muted); margin-top: 6px; }
     main { padding: 16px 28px 32px; }
@@ -82,12 +84,58 @@ const dashboardHTML = `<!doctype html>
       .filters { grid-template-columns: repeat(2, 1fr); }
       .grid { grid-template-columns: 1fr; }
     }
+    dialog {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0;
+      width: min(1100px, 95vw);
+      max-height: 92vh;
+      overflow: hidden;
+      box-shadow: 0 12px 36px rgba(20, 28, 45, 0.18);
+    }
+    dialog::backdrop { background: rgba(15, 20, 35, 0.45); }
+    .config-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+    }
+    .config-head h2 { margin: 0; font-size: 18px; }
+    .config-body { padding: 16px 20px; overflow: auto; max-height: calc(92vh - 120px); }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab {
+      border: 1px solid var(--border); background: #fff; color: var(--text);
+      padding: 8px 14px; border-radius: 9px; cursor: pointer; width: auto; min-width: 90px; font-weight: 500;
+    }
+    .tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .row-controls { display: flex; justify-content: flex-end; margin-bottom: 10px; gap: 8px; }
+    .row-controls button { width: auto; }
+    table.config-table input, table.config-table select {
+      width: 100%; padding: 6px 8px; font-size: 13px; border-radius: 7px;
+    }
+    .icon-btn { padding: 4px 9px; min-width: auto; width: auto; font-size: 12px; }
+    .toast {
+      position: fixed; right: 24px; bottom: 24px; z-index: 9999;
+      padding: 12px 18px; border-radius: 10px; color: #fff; font-size: 14px;
+      box-shadow: 0 8px 22px rgba(20, 28, 45, 0.18);
+      opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+    .toast.ok { background: #12a87c; }
+    .toast.err { background: var(--danger); }
   </style>
 </head>
 <body>
   <header>
-    <h1>apiproxy 性能分析</h1>
-    <div class="subtitle">查看模型请求量、成功率、延迟、每秒 token、上下文长度下 PP/TG 速度。</div>
+    <div class="header-row">
+      <div>
+        <h1>apiproxy 性能分析</h1>
+        <div class="subtitle">查看模型请求量、成功率、延迟、每秒 token、上下文长度下 PP/TG 速度。</div>
+      </div>
+      <div class="header-actions">
+        <button id="configBtn">配置</button>
+      </div>
+    </div>
   </header>
   <main>
     <section class="filters">
@@ -157,6 +205,54 @@ const dashboardHTML = `<!doctype html>
       </div>
     </section>
   </main>
+
+  <dialog id="configDialog" class="config-dialog">
+    <div class="config-head">
+      <h2>配置管理</h2>
+      <div class="row-controls">
+        <button id="closeConfigBtn" class="icon-btn">关闭</button>
+        <button id="saveConfigBtn" class="icon-btn">保存</button>
+      </div>
+    </div>
+    <div class="config-body">
+      <div class="tabs">
+        <button id="tab-providers" class="tab active" data-tab="providers">Providers</button>
+        <button id="tab-routes" class="tab" data-tab="routes">Routes</button>
+      </div>
+      <div id="panel-providers" class="panel active">
+        <div class="row-controls">
+          <button id="addProviderBtn" class="icon-btn">+ 新增 Provider</button>
+        </div>
+        <div class="table-wrap">
+          <table class="config-table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Type</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="providersBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="panel-routes" class="panel">
+        <div class="row-controls">
+          <button id="addRouteBtn" class="icon-btn">+ 新增 Route</button>
+        </div>
+        <div class="table-wrap">
+          <table class="config-table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Strategy</th><th>Providers (provider/model/tier/weight)</th><th>Fallback</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="routesBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast"></div>
 
 <script>
 var charts = {};
@@ -327,6 +423,321 @@ for (var i = 0; i < changeIds.length; i++) {
 }
 
 loadFilters().then(refresh).catch(setError);
+
+// ===== Config management =====
+var MASKED = "***";
+var cfgState = { providers: [], routes: [], providerNames: [] };
+
+function el(tag, attrs, kids) {
+  var n = document.createElement(tag);
+  if (attrs) for (var k in attrs) {
+    if (k === "class") n.className = attrs[k];
+    else if (k === "value") n.value = attrs[k];
+    else if (k === "placeholder") n.placeholder = attrs[k];
+    else if (k === "type") n.type = attrs[k];
+    else if (k === "title") n.title = attrs[k];
+    else n.setAttribute(k, attrs[k]);
+  }
+  if (kids) for (var i = 0; i < kids.length; i++) {
+    var k2 = kids[i];
+    if (k2 == null) continue;
+    n.appendChild(typeof k2 === "string" ? document.createTextNode(k2) : k2);
+  }
+  return n;
+}
+
+function toast(cls, msg) {
+  var t = eid("toast");
+  t.className = "toast " + cls;
+  t.textContent = msg;
+  // force reflow so transition retriggers each call
+  void t.offsetWidth;
+  t.classList.add("show");
+  setTimeout(function() { t.classList.remove("show"); }, 2400);
+}
+
+function loadConfig() {
+  return fetch("/api/config").then(function(res) {
+    if (!res.ok) return res.text().then(function(t) { throw new Error(t); });
+    return res.json();
+  }).then(function(data) {
+    cfgState.providers = data.providers || [];
+    cfgState.routes = data.routes || [];
+    cfgState.providerNames = cfgState.providers.map(function(p) { return p.name; }).sort();
+    renderProviders();
+    renderRoutes();
+  }).catch(function(err) {
+    toast("err", "加载配置失败: " + (err.message || err));
+  });
+}
+
+function renderProviders() {
+  var body = eid("providersBody");
+  body.innerHTML = "";
+  for (var i = 0; i < cfgState.providers.length; i++) {
+    body.appendChild(providerRow(cfgState.providers[i], i));
+  }
+  if (cfgState.providers.length === 0) {
+    body.appendChild(el("tr", null, [el("td", {colspan: "8", class: "muted"}, ["暂无 provider，点右上角新增"])]));
+  }
+}
+
+function providerRow(p, idx) {
+  var typeSel = el("select", null, [
+    el("option", {value: "openai"}, ["openai"]),
+    el("option", {value: "anthropic"}, ["anthropic"])
+  ]);
+  typeSel.value = p.type || "openai";
+  typeSel.addEventListener("change", function() { cfgState.providers[idx].type = typeSel.value; });
+
+  var authSel = el("select", null, [
+    el("option", {value: "x-api-key"}, ["x-api-key"]),
+    el("option", {value: "authorization"}, ["authorization"]),
+    el("option", {value: "both"}, ["both"])
+  ]);
+  authSel.value = p.auth_header || "x-api-key";
+  authSel.addEventListener("change", function() { cfgState.providers[idx].auth_header = authSel.value; });
+
+  var tierSel = el("select", null, [
+    el("option", {value: ""}, ["-"]),
+    el("option", {value: "advanced"}, ["advanced"]),
+    el("option", {value: "standard"}, ["standard"])
+  ]);
+  tierSel.value = p.tier || "";
+  tierSel.addEventListener("change", function() { cfgState.providers[idx].tier = tierSel.value; });
+
+  var nameInput = el("input", {type: "text", value: p.name || ""});
+  nameInput.addEventListener("input", function() {
+    cfgState.providers[idx].name = nameInput.value.trim();
+    cfgState.providerNames = cfgState.providers.map(function(x) { return x.name; }).filter(Boolean).sort();
+    refreshRouteProviderOptions();
+  });
+
+  var urlInput = el("input", {type: "text", value: p.base_url || "", placeholder: "https://..."});
+  urlInput.addEventListener("input", function() { cfgState.providers[idx].base_url = urlInput.value; });
+
+  var keyInput = el("input", {type: "password", value: p.api_key || "", placeholder: p.api_key ? MASKED : "(空)"});
+  keyInput.addEventListener("input", function() { cfgState.providers[idx].api_key = keyInput.value; });
+
+  var keyEnvInput = el("input", {type: "text", value: p.api_key_env || "", placeholder: "可选 ENV 变量名"});
+  keyEnvInput.addEventListener("input", function() { cfgState.providers[idx].api_key_env = keyEnvInput.value; });
+
+  var timeoutInput = el("input", {type: "text", value: p.timeout || "60s"});
+  timeoutInput.addEventListener("input", function() { cfgState.providers[idx].timeout = timeoutInput.value; });
+
+  var delBtn = el("button", {class: "icon-btn", title: "删除"}, ["删除"]);
+  delBtn.addEventListener("click", function() {
+    if (!confirm("确认删除 provider \"" + (p.name || "") + "\"？")) return;
+    cfgState.providers.splice(idx, 1);
+    cfgState.providerNames = cfgState.providers.map(function(x) { return x.name; }).filter(Boolean).sort();
+    renderProviders();
+    refreshRouteProviderOptions();
+  });
+
+  return el("tr", null, [
+    el("td", null, [nameInput]),
+    el("td", null, [typeSel]),
+    el("td", null, [urlInput]),
+    el("td", null, [keyInput]),
+    el("td", null, [keyEnvInput]),
+    el("td", null, [authSel]),
+    el("td", null, [timeoutInput]),
+    el("td", null, [tierSel, " ", delBtn])
+  ]);
+}
+
+function addProvider() {
+  cfgState.providers.push({
+    name: "provider-" + (cfgState.providers.length + 1),
+    type: "openai",
+    base_url: "",
+    api_key: "",
+    api_key_env: "",
+    auth_header: "x-api-key",
+    timeout: "60s",
+    tier: ""
+  });
+  renderProviders();
+  refreshRouteProviderOptions();
+}
+
+function renderRoutes() {
+  var body = eid("routesBody");
+  body.innerHTML = "";
+  for (var i = 0; i < cfgState.routes.length; i++) {
+    body.appendChild(routeRow(cfgState.routes[i], i));
+  }
+  if (cfgState.routes.length === 0) {
+    body.appendChild(el("tr", null, [el("td", {colspan: "4", class: "muted"}, ["暂无 route，点右上角新增"])]));
+  }
+}
+
+function strategyOptions(sel, current) {
+  ["priority", "weighted", "random"].forEach(function(s) {
+    var o = el("option", {value: s}, [s]);
+    if (s === current) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function routeRow(r, idx) {
+  var nameInput = el("input", {type: "text", value: r.name || ""});
+  nameInput.addEventListener("input", function() { cfgState.routes[idx].name = nameInput.value.trim(); });
+
+  var stratSel = el("select", null, []);
+  strategyOptions(stratSel, r.strategy || "priority");
+  stratSel.addEventListener("change", function() { cfgState.routes[idx].strategy = stratSel.value; });
+
+  var providersCell = el("td", null, []);
+  function refreshProviders() {
+    providersCell.innerHTML = "";
+    var fb = r.fallback || {};
+    if (!r.fallback) r.fallback = fb;
+    var fbCheck = el("input", {type: "checkbox"});
+    fbCheck.checked = !!fb.enabled;
+    fbCheck.addEventListener("change", function() { r.fallback.enabled = fbCheck.checked; });
+    providersCell.appendChild(el("label", {style: "margin-bottom:6px"}, [
+      fbCheck, " fallback ",
+      "（on_status: ", (fb.on_status || []).join(",") || "—", ", ",
+      "max_attempts: ", fb.max_attempts || 0, ", ",
+      fb.on_timeout ? "timeout ✓" : "timeout ✗", ", ",
+      fb.on_connect_error ? "conn ✓" : "conn ✗", ")"
+    ]));
+
+    for (var j = 0; j < r.providers.length; j++) {
+      providersCell.appendChild(providerTargetRow(r, j));
+    }
+  }
+  refreshProviders();
+
+  var addTargetBtn = el("button", {class: "icon-btn"}, ["+ provider target"]);
+  addTargetBtn.addEventListener("click", function() {
+    r.providers.push({ provider: "", model: "", tier: "", weight: 0 });
+    refreshProviders();
+  });
+
+  var delBtn = el("button", {class: "icon-btn", title: "删除 route"}, ["删除"]);
+  delBtn.addEventListener("click", function() {
+    if (!confirm("确认删除 route \"" + (r.name || "") + "\"？")) return;
+    cfgState.routes.splice(idx, 1);
+    renderRoutes();
+  });
+
+  return el("tr", null, [
+    el("td", null, [nameInput]),
+    el("td", null, [stratSel]),
+    el("td", null, [providersCell, el("div", {style: "margin-top:6px"}, [addTargetBtn])]),
+    el("td", null, [delBtn])
+  ]);
+}
+
+function providerTargetRow(route, j) {
+  var t = route.providers[j];
+  var provSel = el("select", null, [el("option", {value: ""}, ["-"])]);
+  cfgState.providerNames.forEach(function(n) {
+    provSel.appendChild(el("option", {value: n}, [n]));
+  });
+  provSel.value = t.provider || "";
+  provSel.addEventListener("change", function() { t.provider = provSel.value; });
+
+  var modelInput = el("input", {type: "text", value: t.model || "", placeholder: "model name"});
+  modelInput.addEventListener("input", function() { t.model = modelInput.value; });
+
+  var tierSel = el("select", null, [
+    el("option", {value: ""}, ["-"]),
+    el("option", {value: "advanced"}, ["advanced"]),
+    el("option", {value: "standard"}, ["standard"])
+  ]);
+  tierSel.value = t.tier || "";
+  tierSel.addEventListener("change", function() { t.tier = tierSel.value; });
+
+  var weightInput = el("input", {type: "number", value: String(t.weight || 0), style: "width:64px"});
+  weightInput.addEventListener("input", function() { t.weight = parseInt(weightInput.value || "0", 10); });
+
+  var delBtn = el("button", {class: "icon-btn", title: "删除"}, ["x"]);
+  delBtn.addEventListener("click", function() {
+    route.providers.splice(j, 1);
+    // re-render the whole route row to refresh indices
+    renderRoutes();
+  });
+
+  var wrap = el("div", {style: "display:flex; gap:6px; margin-bottom:6px; align-items:center"}, [
+    el("span", {style: "min-width:64px"}, ["provider:"]), provSel,
+    el("span", {style: "min-width:44px"}, ["model:"]), modelInput,
+    tierSel, weightInput, delBtn
+  ]);
+  return wrap;
+}
+
+function refreshRouteProviderOptions() {
+  // cheap refresh — just re-render routes
+  renderRoutes();
+}
+
+function addRoute() {
+  cfgState.routes.push({
+    name: "route-" + (cfgState.routes.length + 1),
+    strategy: "priority",
+    fallback: {
+      enabled: true, max_attempts: 3,
+      on_status: [429, 500, 502, 503, 504],
+      on_timeout: true, on_connect_error: true,
+      allow_downgrade: false
+    },
+    providers: []
+  });
+  renderRoutes();
+}
+
+function saveConfig() {
+  var saveBtn = eid("saveConfigBtn");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "保存中...";
+  fetch("/api/config", {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ providers: cfgState.providers, routes: cfgState.routes })
+  }).then(function(res) {
+    return res.json().then(function(j) {
+      if (!res.ok) throw new Error(j.error || ("HTTP " + res.status));
+      return j;
+    });
+  }).then(function() {
+    toast("ok", "配置已保存并热加载");
+    loadConfig();
+    refresh();
+  }).catch(function(err) {
+    toast("err", "保存失败: " + (err.message || err));
+  }).finally(function() {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "保存";
+  });
+}
+
+function openConfig() {
+  eid("configDialog").showModal();
+  loadConfig();
+}
+
+function closeConfig() {
+  eid("configDialog").close();
+}
+
+function switchTab(name) {
+  ["providers", "routes"].forEach(function(t) {
+    eid("tab-" + t).classList.toggle("active", t === name);
+    eid("panel-" + t).classList.toggle("active", t === name);
+  });
+}
+
+eid("configBtn").addEventListener("click", openConfig);
+eid("closeConfigBtn").addEventListener("click", closeConfig);
+eid("saveConfigBtn").addEventListener("click", saveConfig);
+eid("addProviderBtn").addEventListener("click", addProvider);
+eid("addRouteBtn").addEventListener("click", addRoute);
+document.querySelectorAll(".tab").forEach(function(t) {
+  t.addEventListener("click", function() { switchTab(t.dataset.tab); });
+});
 </script>
 </body>
 </html>`

@@ -34,6 +34,7 @@ const dashboardHTML = `<!doctype html>
     h1 { margin: 0; font-size: 24px; }
     .subtitle { color: var(--muted); margin-top: 6px; }
     main { padding: 16px 28px 32px; }
+    .view-hidden { display: none; }
     .filters, .card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -103,7 +104,15 @@ const dashboardHTML = `<!doctype html>
       padding: 16px 20px; border-bottom: 1px solid var(--border);
     }
     .config-head h2 { margin: 0; font-size: 18px; }
-    .config-body { padding: 16px 20px; overflow: auto; max-height: calc(92vh - 120px); }
+    .config-body { padding: 16px 20px; }
+    .config-section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 1px 2px rgba(20, 28, 45, 0.04);
+    }
+    .config-section .config-head { border-radius: 14px 14px 0 0; }
+    .config-section .config-body { padding: 20px 24px; }
     .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
     .tab {
       border: 1px solid var(--border); background: #fff; color: var(--text);
@@ -114,9 +123,12 @@ const dashboardHTML = `<!doctype html>
     .panel.active { display: block; }
     .row-controls { display: flex; justify-content: flex-end; margin-bottom: 10px; gap: 8px; }
     .row-controls button { width: auto; }
+    table.config-table th, table.config-table td { vertical-align: top; }
     table.config-table input, table.config-table select {
       width: 100%; padding: 6px 8px; font-size: 13px; border-radius: 7px;
     }
+    .route-target-row { display: grid; grid-template-columns: 72px minmax(140px, 1fr) 52px minmax(180px, 2fr) 100px 76px 34px; gap: 6px; margin-bottom: 6px; align-items: center; }
+    .route-fallback { line-height: 1.8; white-space: normal; }
     .icon-btn { padding: 4px 9px; min-width: auto; width: auto; font-size: 12px; }
     .toast {
       position: fixed; right: 24px; bottom: 24px; z-index: 9999;
@@ -138,11 +150,12 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="header-actions">
         <button id="configBtn">配置</button>
+        <button id="backBtn" class="view-hidden" style="background:#fff;color:var(--primary);">返回仪表盘</button>
         <a href="/logout" id="logoutBtn">退出</a>
       </div>
     </div>
   </header>
-  <main>
+  <main id="dashboardView">
     <section class="filters">
       <div>
         <label>时间范围</label>
@@ -225,51 +238,52 @@ const dashboardHTML = `<!doctype html>
     </section>
   </main>
 
-  <dialog id="configDialog" class="config-dialog">
-    <div class="config-head">
-      <h2>配置管理</h2>
-      <div class="row-controls">
-        <button id="closeConfigBtn" class="icon-btn">关闭</button>
-        <button id="saveConfigBtn" class="icon-btn">保存</button>
+  <section id="configView" class="view-hidden" style="padding:16px 28px 32px;">
+    <div class="config-section">
+      <div class="config-head">
+        <h2>配置管理</h2>
+        <div class="row-controls">
+          <button id="saveConfigBtn" class="icon-btn">保存</button>
+        </div>
+      </div>
+      <div class="config-body">
+        <div class="tabs">
+          <button id="tab-providers" class="tab active" data-tab="providers">Providers</button>
+          <button id="tab-routes" class="tab" data-tab="routes">Routes</button>
+        </div>
+        <div id="panel-providers" class="panel active">
+          <div class="row-controls">
+            <button id="addProviderBtn" class="icon-btn">+ 新增 Provider</button>
+          </div>
+          <div class="table-wrap">
+            <table class="config-table">
+              <thead>
+                <tr>
+                  <th>Name</th><th>Type</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="providersBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="panel-routes" class="panel">
+          <div class="row-controls">
+            <button id="addRouteBtn" class="icon-btn">+ 新增 Route</button>
+          </div>
+          <div class="table-wrap">
+            <table class="config-table">
+              <thead>
+                <tr>
+                  <th>Name</th><th>Strategy</th><th>Providers (provider/model/tier/weight)</th><th>Fallback</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="routesBody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="config-body">
-      <div class="tabs">
-        <button id="tab-providers" class="tab active" data-tab="providers">Providers</button>
-        <button id="tab-routes" class="tab" data-tab="routes">Routes</button>
-      </div>
-      <div id="panel-providers" class="panel active">
-        <div class="row-controls">
-          <button id="addProviderBtn" class="icon-btn">+ 新增 Provider</button>
-        </div>
-        <div class="table-wrap">
-          <table class="config-table">
-            <thead>
-              <tr>
-                <th>Name</th><th>Type</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
-              </tr>
-            </thead>
-            <tbody id="providersBody"></tbody>
-          </table>
-        </div>
-      </div>
-      <div id="panel-routes" class="panel">
-        <div class="row-controls">
-          <button id="addRouteBtn" class="icon-btn">+ 新增 Route</button>
-        </div>
-        <div class="table-wrap">
-          <table class="config-table">
-            <thead>
-              <tr>
-                <th>Name</th><th>Strategy</th><th>Providers (provider/model/tier/weight)</th><th>Fallback</th><th></th>
-              </tr>
-            </thead>
-            <tbody id="routesBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </dialog>
+  </section>
 
   <div id="toast" class="toast"></div>
 
@@ -373,8 +387,17 @@ function upsertChart(id, config) {
   charts[id] = new Chart(eid(id), config);
 }
 
+function toLocalISO(ts) {
+  // ts comes from the API as UTC (e.g. "2026-06-19T05:55:00.000").
+  // Append "Z" so JS parses it as UTC, then format back as local time.
+  var d = new Date(ts + "Z");
+  if (isNaN(d.getTime())) return ts;
+  var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
+  return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
 function renderTimeseries(rows) {
-  var labels = rows.map(function(r) { return r.ts; });
+  var labels = rows.map(function(r) { return toLocalISO(r.ts); });
   upsertChart("latencyChart", {
     type: "line",
     data: { labels: labels, datasets: [{ label: "平均延迟 ms", data: rows.map(function(r){ return r.avg_latency_ms; }), borderColor: "#315efb", tension: 0.25 }] },
@@ -399,9 +422,12 @@ function renderBuckets(rows) {
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(r);
   }
-  var labelsSet = new Set();
-  for (var i = 0; i < (rows || []).length; i++) labelsSet.add(rows[i].bucket);
-  var labels = Array.from(labelsSet);
+  var bucketMap = new Map();
+  for (var i = 0; i < (rows || []).length; i++) {
+    var r = rows[i];
+    if (!bucketMap.has(r.bucket)) bucketMap.set(r.bucket, Number(r.bucket_min) || 0);
+  }
+  var labels = Array.from(bucketMap.entries()).sort(function(a, b) { return a[1] - b[1]; }).map(function(x) { return x[0]; });
   var colors = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
   var ppDatasets = [];
   var tgDatasets = [];
@@ -430,15 +456,12 @@ function renderTokens(rows) {
   for (var i = 0; i < (rows || []).length; i++) {
     var r = rows[i];
     var key = (r.provider || "") + "/" + (r.model || "");
-    var cur = map.get(key) || { model: r.model, prompt: 0, completion: 0, total: 0 };
+    var cur = map.get(key) || { model: r.model, prompt: 0, completion: 0 };
     cur.prompt += Number(r.prompt_tokens) || 0;
     cur.completion += Number(r.completion_tokens) || 0;
-    cur.total += Number(r.total_tokens) || 0;
     map.set(key, cur);
   }
   var items = Array.from(map.values());
-  var grandTotal = 0;
-  for (var i = 0; i < items.length; i++) grandTotal += items[i].total;
 
   var body = eid("tokensBody");
   body.innerHTML = "";
@@ -448,10 +471,11 @@ function renderTokens(rows) {
   }
   for (var i = 0; i < items.length; i++) {
     var m = items[i];
-    var pPct = grandTotal > 0 ? (m.prompt / grandTotal * 100).toFixed(1) + "%" : "-";
-    var cPct = grandTotal > 0 ? (m.completion / grandTotal * 100).toFixed(1) + "%" : "-";
+    var rowTotal = m.prompt + m.completion;
+    var pPct = rowTotal > 0 ? (m.prompt / rowTotal * 100).toFixed(1) + "%" : "-";
+    var cPct = rowTotal > 0 ? (m.completion / rowTotal * 100).toFixed(1) + "%" : "-";
     var tr = document.createElement("tr");
-    tr.innerHTML = td(m.model) + td(fmtTokens(m.prompt)) + td(fmtTokens(m.completion)) + td(fmtTokens(m.total)) + td(pPct) + td(cPct);
+    tr.innerHTML = td(m.model) + td(fmtTokens(m.prompt)) + td(fmtTokens(m.completion)) + td(fmtTokens(rowTotal)) + td(pPct) + td(cPct);
     body.appendChild(tr);
   }
 
@@ -515,7 +539,8 @@ function el(tag, attrs, kids) {
   if (kids) for (var i = 0; i < kids.length; i++) {
     var k2 = kids[i];
     if (k2 == null) continue;
-    n.appendChild(typeof k2 === "string" ? document.createTextNode(k2) : k2);
+    if (typeof k2 === "string" || typeof k2 === "number" || typeof k2 === "boolean") k2 = document.createTextNode(String(k2));
+    n.appendChild(k2);
   }
   return n;
 }
@@ -535,8 +560,8 @@ function loadConfig() {
     if (!res.ok) return res.text().then(function(t) { throw new Error(t); });
     return res.json();
   }).then(function(data) {
-    cfgState.providers = data.providers || [];
-    cfgState.routes = data.routes || [];
+    cfgState.providers = Array.isArray(data.providers) ? data.providers : [];
+    cfgState.routes = Array.isArray(data.routes) ? data.routes : [];
     cfgState.providerNames = cfgState.providers.map(function(p) { return p.name; }).sort();
     renderProviders();
     renderRoutes();
@@ -655,6 +680,9 @@ function strategyOptions(sel, current) {
 }
 
 function routeRow(r, idx) {
+  if (!r) r = {};
+  if (!Array.isArray(r.providers)) r.providers = [];
+  if (!r.fallback) r.fallback = {};
   var nameInput = el("input", {type: "text", value: r.name || ""});
   nameInput.addEventListener("input", function() { cfgState.routes[idx].name = nameInput.value.trim(); });
 
@@ -663,26 +691,42 @@ function routeRow(r, idx) {
   stratSel.addEventListener("change", function() { cfgState.routes[idx].strategy = stratSel.value; });
 
   var providersCell = el("td", null, []);
+  var fallbackCell = el("td", null, []);
   function refreshProviders() {
     providersCell.innerHTML = "";
-    var fb = r.fallback || {};
-    if (!r.fallback) r.fallback = fb;
-    var fbCheck = el("input", {type: "checkbox"});
-    fbCheck.checked = !!fb.enabled;
-    fbCheck.addEventListener("change", function() { r.fallback.enabled = fbCheck.checked; });
-    providersCell.appendChild(el("label", {style: "margin-bottom:6px"}, [
-      fbCheck, " fallback ",
-      "（on_status: ", (fb.on_status || []).join(",") || "—", ", ",
-      "max_attempts: ", fb.max_attempts || 0, ", ",
-      fb.on_timeout ? "timeout ✓" : "timeout ✗", ", ",
-      fb.on_connect_error ? "conn ✓" : "conn ✗", ")"
-    ]));
-
     for (var j = 0; j < r.providers.length; j++) {
       providersCell.appendChild(providerTargetRow(r, j));
     }
   }
+  function refreshFallback() {
+    fallbackCell.innerHTML = "";
+    if (!r.fallback) r.fallback = {};
+    var fb = r.fallback;
+    var fbCheck = el("input", {type: "checkbox"});
+    fbCheck.checked = !!fb.enabled;
+    fbCheck.addEventListener("change", function() { r.fallback.enabled = fbCheck.checked; });
+    var statusInput = el("input", {type: "text", value: (fb.on_status || []).join(","), placeholder: "如 429,500,503", style: "margin-top:6px; width:220px"});
+    statusInput.addEventListener("input", function() {
+      r.fallback.on_status = statusInput.value.split(",").map(function(s) { return parseInt(s.trim(), 10); }).filter(function(n) { return !isNaN(n); });
+    });
+    var maxInput = el("input", {type: "number", value: String(fb.max_attempts || 0), style: "margin-top:6px; width:80px"});
+    maxInput.addEventListener("input", function() { r.fallback.max_attempts = parseInt(maxInput.value || "0", 10); });
+    var toCheck = el("input", {type: "checkbox"});
+    toCheck.checked = !!fb.on_timeout;
+    toCheck.addEventListener("change", function() { r.fallback.on_timeout = toCheck.checked; });
+    var connCheck = el("input", {type: "checkbox"});
+    connCheck.checked = !!fb.on_connect_error;
+    connCheck.addEventListener("change", function() { r.fallback.on_connect_error = connCheck.checked; });
+    fallbackCell.appendChild(el("label", {class: "route-fallback"}, [fbCheck, " 启用 fallback"]));
+    fallbackCell.appendChild(el("div", {class: "route-fallback"}, [
+      "max_attempts: ", maxInput,
+      el("div", {style: "margin-top:6px"}, [toCheck, " on_timeout"]),
+      el("div", {style: "margin-top:4px"}, [connCheck, " on_connect_error"]),
+      el("div", {style: "margin-top:6px"}, ["on_status: ", statusInput])
+    ]));
+  }
   refreshProviders();
+  refreshFallback();
 
   var addTargetBtn = el("button", {class: "icon-btn"}, ["+ provider target"]);
   addTargetBtn.addEventListener("click", function() {
@@ -701,6 +745,7 @@ function routeRow(r, idx) {
     el("td", null, [nameInput]),
     el("td", null, [stratSel]),
     el("td", null, [providersCell, el("div", {style: "margin-top:6px"}, [addTargetBtn])]),
+    el("td", null, [fallbackCell]),
     el("td", null, [delBtn])
   ]);
 }
@@ -735,9 +780,9 @@ function providerTargetRow(route, j) {
     renderRoutes();
   });
 
-  var wrap = el("div", {style: "display:flex; gap:6px; margin-bottom:6px; align-items:center"}, [
-    el("span", {style: "min-width:64px"}, ["provider:"]), provSel,
-    el("span", {style: "min-width:44px"}, ["model:"]), modelInput,
+  var wrap = el("div", {class: "route-target-row"}, [
+    el("span", null, ["provider:"]), provSel,
+    el("span", null, ["model:"]), modelInput,
     tierSel, weightInput, delBtn
   ]);
   return wrap;
@@ -788,13 +833,19 @@ function saveConfig() {
   });
 }
 
-function openConfig() {
-  eid("configDialog").showModal();
-  loadConfig();
+function showDashboard() {
+  eid("dashboardView").classList.remove("view-hidden");
+  eid("configView").classList.add("view-hidden");
+  eid("configBtn").classList.remove("view-hidden");
+  eid("backBtn").classList.add("view-hidden");
 }
 
-function closeConfig() {
-  eid("configDialog").close();
+function showConfig() {
+  eid("dashboardView").classList.add("view-hidden");
+  eid("configView").classList.remove("view-hidden");
+  eid("configBtn").classList.add("view-hidden");
+  eid("backBtn").classList.remove("view-hidden");
+  loadConfig();
 }
 
 function switchTab(name) {
@@ -804,8 +855,8 @@ function switchTab(name) {
   });
 }
 
-eid("configBtn").addEventListener("click", openConfig);
-eid("closeConfigBtn").addEventListener("click", closeConfig);
+eid("configBtn").addEventListener("click", showConfig);
+eid("backBtn").addEventListener("click", showDashboard);
 eid("saveConfigBtn").addEventListener("click", saveConfig);
 eid("addProviderBtn").addEventListener("click", addProvider);
 eid("addRouteBtn").addEventListener("click", addRoute);

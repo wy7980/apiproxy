@@ -198,7 +198,7 @@ const dashboardHTML = `<!doctype html>
           <table class="summary-table">
             <thead>
               <tr>
-                <th>Provider</th><th>Model</th><th>Route</th><th>请求</th><th>错误</th><th>成功率</th><th>平均延迟</th><th>P50</th><th>P95</th><th>P99</th><th>TPS</th><th>Prompt</th><th>Completion</th><th>Fallback</th>
+                <th>Provider</th><th>Model</th><th>Route</th><th>请求</th><th>错误</th><th>成功率</th><th>平均延迟</th><th>P50</th><th>P95</th><th>P99</th><th>TG tok/s</th><th>Prompt</th><th>Completion</th><th>Fallback</th>
               </tr>
             </thead>
             <tbody id="summaryBody"></tbody>
@@ -224,7 +224,7 @@ const dashboardHTML = `<!doctype html>
         <canvas id="latencyChart"></canvas>
       </div>
       <div class="card">
-        <h2>每秒 token 趋势</h2>
+        <h2>生成速度趋势（TG）</h2>
         <canvas id="tpsChart"></canvas>
       </div>
       <div class="card">
@@ -397,19 +397,58 @@ function toLocalISO(ts) {
 }
 
 function renderTimeseries(rows) {
-  var labels = rows.map(function(r) { return toLocalISO(r.ts); });
+  // Collect all unique timestamps across all provider/model groups for the X axis.
+  var tsSet = new Map();
+  for (var i = 0; i < rows.length; i++) {
+    tsSet.set(rows[i].ts, true);
+  }
+  var allTs = Array.from(tsSet.keys()).sort();
+
+  // Group rows by provider/model for multi-line rendering.
+  var grouped = new Map();
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var key = r.provider + "/" + r.model;
+    if (!grouped.has(key)) grouped.set(key, new Map());
+    grouped.get(key).set(r.ts, r);
+  }
+
+  var labels = allTs.map(function(ts) { return toLocalISO(ts); });
+  var colors = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
+
+  // Latency trend: multi-line per provider/model.
+  var latDatasets = [];
+  var idx = 0;
+  grouped.forEach(function(byTs, name) {
+    latDatasets.push({
+      label: name + " 延迟",
+      data: allTs.map(function(ts) { var x = byTs.get(ts); return x ? x.avg_latency_ms : null; }),
+      borderColor: colors[idx % colors.length],
+      tension: 0.25
+    });
+    idx++;
+  });
   upsertChart("latencyChart", {
     type: "line",
-    data: { labels: labels, datasets: [{ label: "平均延迟 ms", data: rows.map(function(r){ return r.avg_latency_ms; }), borderColor: "#315efb", tension: 0.25 }] },
+    data: { labels: labels, datasets: latDatasets },
     options: { responsive: true, maintainAspectRatio: false }
   });
-  var tps = rows.map(function(r) {
-    var latencySeconds = (r.avg_latency_ms || 0) / 1000;
-    return latencySeconds > 0 ? (r.completion_tokens || 0) / latencySeconds : 0;
+
+  // TG token/s trend: multi-line per provider/model, using server-side tokens_per_sec.
+  var tpsDatasets = [];
+  idx = 0;
+  grouped.forEach(function(byTs, name) {
+    tpsDatasets.push({
+      label: name + " TG",
+      data: allTs.map(function(ts) { var x = byTs.get(ts); return x ? x.tokens_per_sec : null; }),
+      borderColor: colors[idx % colors.length],
+      tension: 0.25
+    });
+    idx++;
   });
   upsertChart("tpsChart", {
-    type: "bar",
-    data: { labels: labels, datasets: [{ label: "Completion token/s", data: tps, backgroundColor: "#12a87c" }] },
+    type: "line",
+    data: { labels: labels, datasets: tpsDatasets },
     options: { responsive: true, maintainAspectRatio: false }
   });
 }

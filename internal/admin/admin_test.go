@@ -130,6 +130,18 @@ func TestTimeseries(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	// Each row must carry provider/model grouping and the server-side speed field.
+	for _, r := range rows {
+		if _, ok := r["provider"]; !ok {
+			t.Fatalf("row missing provider field: %v", r)
+		}
+		if _, ok := r["model"]; !ok {
+			t.Fatalf("row missing model field: %v", r)
+		}
+		if _, ok := r["tokens_per_sec"]; !ok {
+			t.Fatalf("row missing tokens_per_sec field: %v", r)
+		}
+	}
 }
 
 func TestBuckets(t *testing.T) {

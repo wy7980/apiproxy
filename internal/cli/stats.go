@@ -324,21 +324,19 @@ func writeTimeseries(out io.Writer, rows []storage.TimeSeriesPoint) {
 		return
 	}
 
-	header := []string{"时间", "请求", "错误", "平均延迟", "Prompt", "Completion", "TPS"}
+	header := []string{"时间", "Provider", "Model", "请求", "错误", "平均延迟", "Prompt", "Completion", "TG tok/s"}
 	data := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		tps := float64(0)
-		if r.AvgLatencyMs > 0 && r.CompletionTokens > 0 {
-			tps = float64(r.CompletionTokens) / (r.AvgLatencyMs / 1000.0)
-		}
 		data = append(data, []string{
 			r.Ts,
+			r.Provider,
+			r.Model,
 			fmt.Sprintf("%d", r.Requests),
 			fmt.Sprintf("%d", r.Errors),
 			fmt.Sprintf("%.0fms", r.AvgLatencyMs),
 			fmt.Sprintf("%d", r.PromptTokens),
 			fmt.Sprintf("%d", r.CompletionTokens),
-			fmt.Sprintf("%.1f", tps),
+			fmt.Sprintf("%.1f", r.TokensPerSec),
 		})
 	}
 	writeTable(out, header, data)

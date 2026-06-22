@@ -395,6 +395,13 @@ type ModelSummary struct {
 }
 
 // ModelSummaries returns one row per (provider, model, route) in the window.
+// TokensPerSec uses the generation-throughput (TG) formula:
+//
+//	SUM(success_completion_tokens) / SUM(success_generation_seconds)
+//
+// where success requests are status < 400, no error, and completion > 0.
+// Generation seconds is (latency - first_token) for streaming and latency for
+// non-streaming, both restricted to valid speed samples.
 func (s *Store) ModelSummaries(ctx context.Context, f QueryFilter) ([]ModelSummary, error) {
 	where, args := f.clauses()
 	shards, err := s.resolveShards(ctx, f)
@@ -403,21 +410,28 @@ func (s *Store) ModelSummaries(ctx context.Context, f QueryFilter) ([]ModelSumma
 	}
 	from, fromArgs := unionFrom(where, args, shards)
 
+	const successCond = "status_code < 400 AND error_type = '' AND completion_tokens > 0"
 	q := fmt.Sprintf(`
 		SELECT
 			provider, model, route,
 			COUNT(*)                                       AS requests,
 			COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END), 0) AS errors,
 			COALESCE(SUM(CASE WHEN fallback_count > 0 THEN 1 ELSE 0 END), 0)                      AS fallbacks,
-			COALESCE(AVG(latency_ms), 0)                  AS avg_latency_ms,
-			COALESCE(AVG(CASE WHEN stream = 1 THEN first_token_ms END), 0) AS avg_first_token_ms,
+			COALESCE(AVG(CASE WHEN status_code < 400 AND error_type = '' THEN latency_ms END), 0) AS avg_latency_ms,
+			COALESCE(AVG(CASE WHEN stream = 1 AND status_code < 400 AND error_type = '' THEN first_token_ms END), 0) AS avg_first_token_ms,
 			COALESCE(SUM(prompt_tokens), 0)               AS prompt_tokens,
 			COALESCE(SUM(completion_tokens), 0)           AS completion_tokens,
 			COALESCE(SUM(total_tokens), 0)                AS total_tokens,
-			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0)        AS stream_requests
+			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0)        AS stream_requests,
+			COALESCE(SUM(CASE WHEN %s THEN completion_tokens ELSE 0 END), 0) AS speed_completion,
+			COALESCE(SUM(CASE WHEN %s THEN
+				CASE WHEN stream = 1 AND first_token_ms > 0 AND latency_ms > first_token_ms
+					THEN latency_ms - first_token_ms
+					ELSE latency_ms END
+				ELSE 0 END), 0)                                                 AS speed_gen_ms
 		FROM %s
 		GROUP BY provider, model, route
-		ORDER BY provider, model, route`, from)
+		ORDER BY provider, model, route`, successCond, successCond, from)
 	rows, err := s.db.QueryContext(ctx, q, fromArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("model summaries: %w", err)
@@ -427,20 +441,20 @@ func (s *Store) ModelSummaries(ctx context.Context, f QueryFilter) ([]ModelSumma
 	var out []ModelSummary
 	for rows.Next() {
 		var m ModelSummary
+		var speedCompl int64
+		var speedGenMs float64
 		if err := rows.Scan(&m.Provider, &m.Model, &m.Route,
 			&m.Requests, &m.Errors, &m.Fallbacks,
 			&m.AvgLatencyMs, &m.FirstTokenMs,
 			&m.PromptTokens, &m.CompletionTokens, &m.TotalTokens,
-			&m.StreamRequests,
+			&m.StreamRequests, &speedCompl, &speedGenMs,
 		); err != nil {
 			return nil, err
 		}
 		if m.Requests > 0 {
 			m.SuccessRate = float64(m.Requests-m.Errors) / float64(m.Requests)
 		}
-		if m.AvgLatencyMs > 0 && m.CompletionTokens > 0 {
-			m.TokensPerSec = float64(m.CompletionTokens) / (m.AvgLatencyMs / 1000.0)
-		}
+		m.TokensPerSec = tokenRate(speedCompl, speedGenMs)
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -531,7 +545,7 @@ func (s *Store) SpeedByPromptBucket(ctx context.Context, f QueryFilter, buckets 
 
 	q := fmt.Sprintf(`
 		SELECT provider, model, prompt_tokens, completion_tokens,
-		       latency_ms, first_token_ms, stream
+		       latency_ms, first_token_ms, stream, status_code, error_type
 		FROM %s`, from)
 	rows, err := s.db.QueryContext(ctx, q, fromArgs...)
 	if err != nil {
@@ -546,6 +560,12 @@ func (s *Store) SpeedByPromptBucket(ctx context.Context, f QueryFilter, buckets 
 		totalLatMs  float64
 		totalFTMs   float64
 		streamCount int
+		// Speed-specific accumulators: only from successful requests with
+		// valid generation time observations.
+		speedCompletion int64
+		speedGenMs      float64
+		speedPrompt     int64 // prompt tokens for PPRate (streamed only)
+		speedFTMs       float64 // first_token_ms for PPRate (streamed only)
 	}
 	groups := map[string]*agg{}
 
@@ -553,8 +573,9 @@ func (s *Store) SpeedByPromptBucket(ctx context.Context, f QueryFilter, buckets 
 		var prov, model string
 		var prompt, completion int64
 		var latMs, ftMs float64
-		var stream int
-		if err := rows.Scan(&prov, &model, &prompt, &completion, &latMs, &ftMs, &stream); err != nil {
+		var stream, statusCode int
+		var errType string
+		if err := rows.Scan(&prov, &model, &prompt, &completion, &latMs, &ftMs, &stream, &statusCode, &errType); err != nil {
 			return nil, err
 		}
 		b := bucketFor(int(prompt), buckets)
@@ -571,6 +592,25 @@ func (s *Store) SpeedByPromptBucket(ctx context.Context, f QueryFilter, buckets 
 		a.totalFTMs += ftMs
 		if stream == 1 {
 			a.streamCount++
+		}
+		// Accumulate speed-specific fields only from successful requests
+		// with valid generation-time observations.
+		isSuccess := statusCode < 400 && errType == "" && completion > 0
+		if isSuccess {
+			genMs := 0.0
+			if stream == 1 && ftMs > 0 && latMs > ftMs {
+				genMs = latMs - ftMs
+			} else if latMs > 0 {
+				genMs = latMs // non-streaming: approximate generation time
+			}
+			if genMs > 0 {
+				a.speedCompletion += completion
+				a.speedGenMs += genMs
+			}
+			if stream == 1 && ftMs > 0 {
+				a.speedPrompt += prompt
+				a.speedFTMs += ftMs
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -593,29 +633,33 @@ func (s *Store) SpeedByPromptBucket(ctx context.Context, f QueryFilter, buckets 
 			TotalLatencyMs:   a.totalLatMs,
 			AvgLatencyMs:     a.totalLatMs / float64(a.count),
 		}
-		if a.totalFTMs > 0 {
-			row.PPRate = float64(a.prompt) / (a.totalFTMs / 1000.0)
+		if a.speedFTMs > 0 {
+			row.PPRate = float64(a.speedPrompt) / (a.speedFTMs / 1000.0)
 		}
-		genSec := (a.totalLatMs - a.totalFTMs) / 1000.0
-		if genSec > 0 {
-			row.TGRate = float64(a.completion) / genSec
-		}
+		row.TGRate = tokenRate(a.speedCompletion, a.speedGenMs)
 		out = append(out, row)
 	}
 	return out, nil
 }
 
-// TimeSeriesPoint is one data point in a time series.
+// TimeSeriesPoint is one data point in a time series, keyed by time bucket and
+// (provider, model). TokensPerSec is the generation (TG) throughput computed
+// server-side from successful requests only — see tokenSpeedFromEvents.
 type TimeSeriesPoint struct {
-	Ts              string  `json:"ts"`
-	Requests        int     `json:"requests"`
-	Errors          int     `json:"errors"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
-	CompletionTokens int64  `json:"completion_tokens"`
-	PromptTokens    int64   `json:"prompt_tokens"`
+	Ts               string  `json:"ts"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Requests         int     `json:"requests"`
+	Errors           int     `json:"errors"`
+	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	TokensPerSec     float64 `json:"tokens_per_sec"`
 }
 
-// TimeSeries returns per-bucket aggregates ordered by time.
+// TimeSeries returns per-bucket, per-(provider, model) aggregates ordered by
+// time. TokensPerSec is computed from successful requests so the client does
+// not need to re-derive it.
 func (s *Store) TimeSeries(ctx context.Context, f QueryFilter, interval string) ([]TimeSeriesPoint, error) {
 	fmtSpec := "%Y-%m-%dT%H:%M:00.000"
 	switch interval {
@@ -633,17 +677,29 @@ func (s *Store) TimeSeries(ctx context.Context, f QueryFilter, interval string) 
 	}
 	from, fromArgs := unionFrom(where, args, shards)
 
+	// success-cond distinguishes requests eligible to contribute to the
+	// generation-throughput calculation: status < 400, no error_type, and a
+	// non-zero completion token count.
+	const successCond = "status_code < 400 AND error_type = '' AND completion_tokens > 0"
 	q := fmt.Sprintf(`
 		SELECT
-			strftime('%s', timestamp)                AS bucket,
-			COUNT(*)                                 AS requests,
+			strftime('%s', timestamp)                                          AS bucket,
+			provider,
+			model,
+			COUNT(*)                                                            AS requests,
 			COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type != '' THEN 1 ELSE 0 END), 0) AS errors,
-			COALESCE(AVG(latency_ms), 0)             AS avg_latency_ms,
-			COALESCE(SUM(completion_tokens), 0)      AS completion_tokens,
-			COALESCE(SUM(prompt_tokens), 0)          AS prompt_tokens
+			COALESCE(AVG(CASE WHEN status_code < 400 AND error_type = '' THEN latency_ms END), 0) AS avg_latency_ms,
+			COALESCE(SUM(completion_tokens), 0)                                 AS completion_tokens,
+			COALESCE(SUM(prompt_tokens), 0)                                     AS prompt_tokens,
+			COALESCE(SUM(CASE WHEN %s THEN completion_tokens ELSE 0 END), 0)    AS speed_completion,
+			COALESCE(SUM(CASE WHEN %s THEN
+				CASE WHEN stream = 1 AND first_token_ms > 0 AND latency_ms > first_token_ms
+					THEN latency_ms - first_token_ms
+					ELSE latency_ms END
+				ELSE 0 END), 0)                                                 AS speed_gen_ms
 		FROM %s
-		GROUP BY bucket
-		ORDER BY bucket ASC`, fmtSpec, from)
+		GROUP BY bucket, provider, model
+		ORDER BY bucket ASC, provider, model`, fmtSpec, successCond, successCond, from)
 	rows, err := s.db.QueryContext(ctx, q, fromArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("time series: %w", err)
@@ -652,15 +708,30 @@ func (s *Store) TimeSeries(ctx context.Context, f QueryFilter, interval string) 
 
 	var out []TimeSeriesPoint
 	for rows.Next() {
-		var p TimeSeriesPoint
-		if err := rows.Scan(&p.Ts, &p.Requests, &p.Errors,
+		var (
+			p             TimeSeriesPoint
+			speedCompl    int64
+			speedGenMs    float64
+		)
+		if err := rows.Scan(&p.Ts, &p.Provider, &p.Model, &p.Requests, &p.Errors,
 			&p.AvgLatencyMs, &p.CompletionTokens, &p.PromptTokens,
+			&speedCompl, &speedGenMs,
 		); err != nil {
 			return nil, err
 		}
+		p.TokensPerSec = tokenRate(speedCompl, speedGenMs)
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// tokenRate computes the generation (TG) throughput: completion tokens divided
+// by generation time (in ms). Returns 0 when generation time is non-positive.
+func tokenRate(completionTokens int64, generationMs float64) float64 {
+	if generationMs > 0 && completionTokens > 0 {
+		return float64(completionTokens) / (generationMs / 1000.0)
+	}
+	return 0
 }
 
 // DistinctValues returns distinct values for a column in the window.

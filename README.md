@@ -195,7 +195,7 @@ export APIPROXY_ADMIN_PASS=$(openssl rand -base64 24)
 ./apiproxy stats -config configs/apiproxy.yaml -window 168h -interval minute
 
 # 按 provider 过滤
-./apiproxy stats -config configs/apiproxy.yaml -window 168h -provider qianxin
+./apiproxy stats -config configs/apiproxy.yaml -window 168h -provider example-provider
 
 # JSON 输出
 ./apiproxy stats -config configs/apiproxy.yaml -window 168h -json
@@ -223,34 +223,40 @@ export APIPROXY_ADMIN_PASS=$(openssl rand -base64 24)
 ```
 最近 168 小时 的统计
 
-Provider  Model              Route       请求  错误  成功率    平均     P50     P95     P99    TPS  Prompt  Compl  Stream
---------  -----------------  ----------  ----  ----  ------  ------  ------  ------  ------  -----  ------  -----  ------
-qianxin   DeepSeek-V4-Flash  smart-chat    36     1   97.2%  2350ms  2299ms  4254ms  4662ms  940.8   51562   2211       1
+Provider  Model              Route       请求  错误  成功率    平均     P50     P95     P99    TG tok/s  Prompt  Compl  Stream
+--------  -----------------  ----------  ----  ----  ------  ------  ------  ------  ------  --------  ------  -----  ------
+example-provider   deepseek-v3  smart-chat    36     1   97.2%  2350ms  2299ms  4254ms  4662ms    940.8   51562   2211       1
 
 按上下文长度分桶 (PP/TG 速度)
 
 Provider  Model                   桶  请求  Prompt  Completion  平均延迟  PP tok/s  TG tok/s
 --------  -----------------  -------  ----  ------  ----------  --------  --------  --------
-qianxin   DeepSeek-V4-Flash    0-128    22     296        1054    2060ms     496.6      23.6
-qianxin   DeepSeek-V4-Flash  128-512     7    1405         688    3146ms       0.0      31.2
-qianxin   DeepSeek-V4-Flash    2k-8k     7   49861         469    2466ms       0.0      27.2
+example-provider   deepseek-v3    0-128    22     296        1054    2060ms     496.6      23.6
+example-provider   deepseek-v3  128-512     7    1405         688    3146ms       0.0      31.2
+example-provider   deepseek-v3    2k-8k     7   49861         469    2466ms       0.0      27.2
 
 时间序列趋势
 
-时间                     请求  错误  平均延迟  Prompt  Completion    TPS
------------------------  ----  ----  --------  ------  ----------  -----
-2026-06-17T00:00:00.000    36     1    2350ms   51562        2211  940.8
+时间                     Provider  Model               请求  错误  平均延迟  Prompt  Completion  TG tok/s
+-----------------------  --------  ------------------  ----  ----  --------  ------  ----------  --------
+2026-06-17T00:00:00.000  example-provider   deepseek-v3     36     1    2350ms   51562        2211     940.8
 ```
 
 **minute 粒度（精细到每分钟）**
 
 ```
-时间                     请求  错误  平均延迟  Prompt  Completion    TPS
------------------------  ----  ----  --------  ------  ----------  -----
-2026-06-17T20:11:00.000     1     0    1405ms       8          31   22.1
-2026-06-17T20:12:00.000    23     1    2113ms   35855        1320  624.7
-2026-06-17T20:13:00.000    12     0    2884ms   15699         860  298.2
+时间                     Provider  Model               请求  错误  平均延迟  Prompt  Completion  TG tok/s
+-----------------------  --------  ------------------  ----  ----  --------  ------  ----------  --------
+2026-06-17T20:11:00.000  example-provider   deepseek-v3      1     0    1405ms       8          31      22.1
+2026-06-17T20:12:00.000  example-provider   deepseek-v3     23     1    2113ms   35855        1320     624.7
+2026-06-17T20:13:00.000  example-provider   deepseek-v3     12     0    2884ms   15699         860     298.2
 ```
+
+> **TG tok/s 口径说明**：`tokens_per_sec` / TG tok/s 是生成阶段吞吐速率，计算公式为
+> `SUM(成功请求 completion_tokens) / SUM(成功请求 generation_seconds)`。
+> 生成耗时对流式请求取 `latency_ms - first_token_ms`，对非流式请求退化用 `latency_ms`。
+> 成功请求条件：`status_code < 400 AND error_type = '' AND completion_tokens > 0`。
+> 该指标只用于速度计算；`prompt_tokens` / `completion_tokens` / `total_tokens` 等总量字段仍统计所有请求。
 
 **JSON 模式**
 
@@ -260,8 +266,8 @@ qianxin   DeepSeek-V4-Flash    2k-8k     7   49861         469    2466ms       0
   "interval": "day",
   "summaries": [
     {
-      "provider": "qianxin",
-      "model": "DeepSeek-V4-Flash",
+      "provider": "example-provider",
+      "model": "deepseek-v3",
       "route": "smart-chat",
       "requests": 36,
       "errors": 1,
@@ -278,8 +284,8 @@ qianxin   DeepSeek-V4-Flash    2k-8k     7   49861         469    2466ms       0
   "buckets": [
     {
       "bucket": "0-128",
-      "provider": "qianxin",
-      "model": "DeepSeek-V4-Flash",
+      "provider": "example-provider",
+      "model": "deepseek-v3",
       "requests": 22,
       "pp_rate": 496.6,
       "tg_rate": 23.6,
@@ -289,11 +295,14 @@ qianxin   DeepSeek-V4-Flash    2k-8k     7   49861         469    2466ms       0
   "timeseries": [
     {
       "ts": "2026-06-17T00:00:00.000",
+      "provider": "example-provider",
+      "model": "deepseek-v3",
       "requests": 36,
       "errors": 1,
       "avg_latency_ms": 2350,
       "prompt_tokens": 51562,
-      "completion_tokens": 2211
+      "completion_tokens": 2211,
+      "tokens_per_sec": 940.8
     }
   ]
 }

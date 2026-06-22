@@ -35,8 +35,8 @@ routes:
 	if cfg.Server.RequestTimeout != 120*time.Second {
 		t.Fatalf("request timeout = %s", cfg.Server.RequestTimeout)
 	}
-	if cfg.Providers["test"].Type != "openai" {
-		t.Fatalf("provider type = %q", cfg.Providers["test"].Type)
+	if cfg.Providers["test"].AuthHeader != "both" {
+		t.Fatalf("provider auth_header default = %q, want both", cfg.Providers["test"].AuthHeader)
 	}
 	if cfg.Providers["test"].APIKey != "secret-key" {
 		t.Fatalf("api key = %q", cfg.Providers["test"].APIKey)
@@ -150,6 +150,83 @@ func TestProviderAPIKeyUsesEnv(t *testing.T) {
 
 	if got := cfg.ProviderAPIKey("test"); got != "from-env" {
 		t.Fatalf("ProviderAPIKey() = %q", got)
+	}
+}
+
+func TestLogFileDirRequiredWhenEnabled(t *testing.T) {
+	path := writeTempConfig(t, `
+server:
+  listen: ":9090"
+providers:
+  test:
+    base_url: "https://example.com/v1"
+routes:
+  chat:
+    providers:
+      - provider: test
+        model: test-model
+logging:
+  file:
+    enabled: true
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "logging.file.dir is required") {
+		t.Fatalf("Load() error = %v, want dir required error", err)
+	}
+}
+
+func TestLogFileDefaultsWhenEnabled(t *testing.T) {
+	path := writeTempConfig(t, `
+server:
+  listen: ":9090"
+providers:
+  test:
+    base_url: "https://example.com/v1"
+routes:
+  chat:
+    providers:
+      - provider: test
+        model: test-model
+logging:
+  file:
+    enabled: true
+    dir: "logs"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Logging.File.MaxDays != 7 {
+		t.Fatalf("max_days default = %d, want 7", cfg.Logging.File.MaxDays)
+	}
+	if cfg.Logging.File.MaxSize != 100 {
+		t.Fatalf("max_size default = %d, want 100", cfg.Logging.File.MaxSize)
+	}
+}
+
+func TestLogFileNotSetWhenDisabled(t *testing.T) {
+	path := writeTempConfig(t, `
+server:
+  listen: ":9090"
+providers:
+  test:
+    base_url: "https://example.com/v1"
+routes:
+  chat:
+    providers:
+      - provider: test
+        model: test-model
+logging:
+  file:
+    enabled: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Logging.File.MaxDays != 0 || cfg.Logging.File.MaxSize != 0 {
+		t.Fatalf("file logging disabled but got max_days=%d max_size=%d",
+			cfg.Logging.File.MaxDays, cfg.Logging.File.MaxSize)
 	}
 }
 

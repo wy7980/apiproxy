@@ -12,42 +12,47 @@ auth:
       client_id: "demo"
 
 providers:
+  # Transparent providers — there is no `type` field anymore. The protocol
+  # (OpenAI Chat Completions vs Anthropic Messages) is decided by the client's
+  # request path: /v1/chat/completions is forwarded to <base_url>/v1/chat/completions,
+  # /v1/messages to <base_url>/v1/messages. One provider can serve both.
+  # auth_header defaults to "both" (x-api-key + Authorization: Bearer) for max
+  # upstream compatibility; set "authorization" or "x-api-key" to send only one.
   openai:
-    type: openai
     base_url: "https://api.openai.com/v1"
     api_key_env: "OPENAI_API_KEY"
     api_key: ""
+    # Official OpenAI uses Bearer auth.
+    auth_header: authorization
     timeout: 60s
     tier: advanced
 
   deepseek:
-    type: openai
     base_url: "https://api.deepseek.com/v1"
     api_key_env: "DEEPSEEK_API_KEY"
     api_key: ""
+    auth_header: authorization
     timeout: 60s
     tier: standard
 
   qwen:
-    type: openai
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key_env: "DASHSCOPE_API_KEY"
     api_key: ""
+    auth_header: authorization
     timeout: 60s
     tier: standard
 
-  # Anthropic provider for /v1/messages (Claude Code, Anthropic clients).
-  # base_url is the bare host — the provider adds /v1/messages automatically.
+  # Provider for /v1/messages (Claude Code, Anthropic clients).
+  # base_url may be bare host or include /v1; known path suffixes are stripped
+  # and the client's path is appended, so it normalizes automatically.
   anthropic:
-    type: anthropic
-    # Official Anthropic: https://api.anthropic.com
-    # new-api / one-api gateways can also be used here; /v1 and /v1/messages
-    # suffixes are accepted and normalized automatically.
     base_url: "https://api.anthropic.com"
     api_key_env: "ANTHROPIC_API_KEY"
     api_key: ""
     # Official Anthropic uses x-api-key. Many new-api/one-api gateways use
-    # Authorization: Bearer instead; set auth_header: authorization for those.
+    # Authorization: Bearer instead; set auth_header: authorization for those,
+    # or auth_header: both to emit both headers.
     auth_header: x-api-key
     timeout: 120s
     tier: advanced
@@ -132,7 +137,22 @@ storage:
 admin:
   enabled: true
   listen: ":8081"
+  # Credentials are read from these env vars. Set them before starting:
+  #   export APIPROXY_ADMIN_USER=admin
+  #   export APIPROXY_ADMIN_PASS=$(openssl rand -base64 24)
+  # Defaults to env var names APIPROXY_ADMIN_USER / APIPROXY_ADMIN_PASS.
+  username_env: "APIPROXY_ADMIN_USER"
+  password_env: "APIPROXY_ADMIN_PASS"
 
 logging:
   level: info
   format: json
+  file:
+    # When enabled, also write logs to detail-YYYYMMDD.log under dir.
+    # Non-current-day files are gzipped to .log.gz; files older than
+    # max_days are deleted. max_size is per-file MB (size-exceeded files
+    # roll into detail-YYYYMMDD.N.log).
+    enabled: false
+    dir: "logs"
+    max_days: 7
+    max_size: 100

@@ -5,7 +5,7 @@
 ## 目标
 
 - **统一接入**: Agent 只调用 apiproxy 的 OpenAI 兼容 API,由 apiproxy 路由到 OpenAI / DeepSeek / Qwen 等。
-- **Anthropic 透明转发**: `/v1/messages` 透传 Anthropic 原生协议(供 Claude Code 等客户端使用),不做任何格式转换,上游负责模型适配与协议处理。
+- **透明代理**: `/v1/chat/completions` 和 `/v1/messages` 均原样透传——协议由 client 的 request path 决定,proxy 只做路由和 fallback,不做任何格式转换。一个 provider 可以同时服务 OpenAI 和 Anthropic 客户端。
 - **实时监控**: Prometheus 指标 + JSON 结构化日志,覆盖延迟、首 token 时延、token 用量、错误率、fallback 次数。
 - **自动 fallback**: 超时 / 429 / 5xx / 连接错误时按优先级 fallback 到下一个 provider。
 - **熔断**: 按 provider 维度的简单熔断状态机(默认未启用自动切换)。
@@ -23,7 +23,7 @@ apiproxy/
     api/                OpenAI / Anthropic 请求的最小解析与错误格式
     router/             路由策略(priority / weighted / latency ...)
     fallback/           fallback 决策
-    provider/           provider 抽象 + openai / anthropic adapters
+    provider/           provider 抽象 + 透明 HTTP provider(按 client path 镜像上游路径)
     breaker/            简单熔断状态机
     metrics/            Prometheus 指标
     log/                slog 日志初始化
@@ -46,11 +46,15 @@ export DEEPSEEK_API_KEY=sk-xxx
 export DASHSCOPE_API_KEY=sk-xxx
 export ANTHROPIC_API_KEY=sk-ant-xxx
 
+# 设置 admin 登录凭据（启用 admin 时必填）
+export APIPROXY_ADMIN_USER=admin
+export APIPROXY_ADMIN_PASS=$(openssl rand -base64 24)
+
 # 启动
 go run ./cmd/apiproxy -config configs/apiproxy.yaml
 ```
 
-调用示例(用 route 名当 model):
+调用示例(用 route 名当 model，OpenAI 和 Anthropic 客户端都可走同一套 provider 配置):
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -89,12 +93,47 @@ curl http://localhost:8080/v1/messages \
   }'
 ```
 
-`/v1/messages` 不做 Anthropic/OpenAI 格式转换，只替换 `model` 字段并将请求体和响应体原样透传到 `type: anthropic` provider。
+`/v1/messages` 不做 Anthropic/OpenAI 格式转换，只替换 `model` 字段并将请求体和响应体原样透传到上游。协议完全由 client 的 request path 决定——同一个 provider 可以同时服务 `/v1/chat/completions`（OpenAI 格式）和 `/v1/messages`（Anthropic 格式），无需配置 `type` 字段。
 
 查看指标:
 
 ```bash
 curl http://localhost:8080/metrics
+```
+
+## 安全
+
+### 凭据
+
+- Provider API key 通过环境变量注入（`api_key_env`），YAML 里不落密钥。
+- `auth_header` 决定上游鉴权头写法：`both`（默认，兼容性最好）、`authorization`（只发 Bearer）或 `x-api-key`（只发 Anthropic 风格 header）。
+- Admin 登录用户名/密码通过 `APIPROXY_ADMIN_USER` / `APIPROXY_ADMIN_PASS` 环境变量注入，不写进配置文件。
+- Admin session cookie 是 HMAC 签名随机 token，`HttpOnly` + `SameSite=Lax`，HTTPS 下自动 `Secure`。
+
+### HTTP 加固
+
+- **登录限流**: 同一用户名连续 5 次失败后锁定 15 分钟，期间返回 429。
+- **请求体大小限制**: 请求 body 超过 32 MiB 直接返回 413，防止内存打爆。
+- **Cookie 安全**: session cookie 强制 `HttpOnly`、`SameSite=Lax`，TLS 下 `Secure`。
+- **Admin 鉴权**: `/api/*` 未登录返回 401，其余未登录路径 303 重定向到 `/login`。
+
+## 日志轮转
+
+`logging.file.enabled: true` 时，除 stdout 外把日志写入 `dir/detail-YYYYMMDD.log`：
+
+- 非当天的日志文件自动 gzip 为 `.log.gz`。
+- 超过 `max_days` 的文件（含压缩）自动删除。
+- 单文件超过 `max_size` MB 时按序号滚动为 `detail-YYYYMMDD.N.log`。
+
+```yaml
+logging:
+  level: info
+  format: json
+  file:
+    enabled: true
+    dir: "logs"
+    max_days: 7
+    max_size: 100   # 单文件 100 MB
 ```
 
 ## 数据持久化
@@ -126,9 +165,18 @@ storage:
 admin:
   enabled: true
   listen: ":8081"
+  username_env: "APIPROXY_ADMIN_USER"
+  password_env: "APIPROXY_ADMIN_PASS"
 ```
 
-浏览器访问 `http://localhost:8081`，可查看：
+启动前设置登录凭据：
+
+```bash
+export APIPROXY_ADMIN_USER=admin
+export APIPROXY_ADMIN_PASS=$(openssl rand -base64 24)
+```
+
+浏览器访问 `http://localhost:8081`，登录后可查看：
 
 - 模型性能汇总（请求量、成功率、延迟 P50/P95/P99、TPS）
 - 延迟 & token/s 时间趋势图
@@ -299,8 +347,14 @@ routes:
 - [x] SQLite 持久化存储（按天分表 + 可配置保留天数）
 - [x] 性能分析 dashboard (HTML+Chart.js)
 - [x] CLI stats 子命令（表格 + JSON + 时间序列）
+- [x] 透明代理：按 client path 镜像上游路径，同时支持 OpenAI 和 Anthropic 协议
+- [x] Admin 登录鉴权（session cookie + HMAC 签名）
+- [x] Admin 登录限流（连续失败锁定）
+- [x] HTTP 安全加固（请求体大小限制、Cookie 安全属性）
+- [x] 凭据环境变量注入（provider API key、admin 用户名密码）
+- [x] 文件日志轮转（按天分文件 + gzip 压缩 + 自动清理）
+- [x] E2E 集成测试（proxy + admin + SQLite 真实 TCP）
 - [ ] 加权 / 低延迟 / 健康优先路由
 - [ ] 自动熔断触发(目前仅有状态机)
-- [x] Anthropic `/v1/messages` 透明转发（不做格式转换）
 - [ ] 成本估算 / 审计日志
 - [ ] OpenTelemetry tracing

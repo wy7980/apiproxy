@@ -60,7 +60,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := log.Setup(cfg.Logging.Level, cfg.Logging.Format)
+	logger, logCloser := log.Setup(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
+	defer logCloser.Close()
 	metrics.Init()
 
 	srv, err := server.New(cfg, logger)
@@ -111,7 +112,13 @@ func main() {
 		if store == nil {
 			logger.Warn("admin server enabled but storage is disabled; dashboard will not show data")
 		} else {
-			admin := admin.New(store, logger, configPath, srv, "admin", "skyeye@2026")
+			adminUser := os.Getenv(cfg.Admin.UsernameEnv)
+			adminPass := os.Getenv(cfg.Admin.PasswordEnv)
+			if adminUser == "" || adminPass == "" {
+				logger.Error("admin credentials are required", "username_env", cfg.Admin.UsernameEnv, "password_env", cfg.Admin.PasswordEnv)
+				os.Exit(1)
+			}
+			admin := admin.New(store, logger, configPath, srv, adminUser, adminPass)
 			adminSrv = &http.Server{
 				Addr:              cfg.Admin.Listen,
 				Handler:           admin.Handler(),

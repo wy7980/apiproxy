@@ -38,19 +38,19 @@ func testConfig() *config.Config {
 		Server: config.ServerConfig{Listen: ":0", RequestTimeout: 30 * time.Second},
 		Auth:   config.AuthConfig{Enabled: true, APIKeys: []config.APIKey{{Key: "test-key", ClientID: "tester"}}},
 		Providers: map[string]config.Provider{
-			"p1": {Type: "openai", BaseURL: "https://p1.example.com/v1", Timeout: 10 * time.Second, Tier: "advanced"},
-			"p2": {Type: "openai", BaseURL: "https://p2.example.com/v1", Timeout: 10 * time.Second, Tier: "advanced"},
+			"p1": {BaseURL: "https://p1.example.com/v1", Timeout: 10 * time.Second, Tier: "advanced"},
+			"p2": {BaseURL: "https://p2.example.com/v1", Timeout: 10 * time.Second, Tier: "advanced"},
 		},
 		Routes: map[string]config.Route{
 			"chat": {
 				Strategy: "priority",
 				Fallback: config.FallbackConfig{
-					Enabled:         true,
-					MaxAttempts:     2,
-					OnStatus:        []int{429, 500, 502, 503, 504},
-					OnTimeout:       true,
-					OnConnectError:  true,
-					AllowDowngrade:  false,
+					Enabled:        true,
+					MaxAttempts:    2,
+					OnStatus:       []int{429, 500, 502, 503, 504},
+					OnTimeout:      true,
+					OnConnectError: true,
+					AllowDowngrade: false,
 				},
 				Providers: []config.RouteTarget{
 					{Provider: "p1", Model: "m1", Tier: "advanced"},
@@ -58,8 +58,8 @@ func testConfig() *config.Config {
 				},
 			},
 		},
-		Metrics:    config.MetricsConfig{},
-		Logging:    config.LoggingConfig{Level: "info", Format: "json"},
+		Metrics: config.MetricsConfig{},
+		Logging: config.LoggingConfig{Level: "info", Format: "json"},
 	}
 }
 
@@ -440,7 +440,7 @@ func TestReload_SwapsProviders(t *testing.T) {
 		Server: config.ServerConfig{Listen: ":0", RequestTimeout: 30 * time.Second},
 		Auth:   config.AuthConfig{Enabled: true, APIKeys: []config.APIKey{{Key: "test-key", ClientID: "tester"}}},
 		Providers: map[string]config.Provider{
-			"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "ignored", Timeout: 5 * time.Second, Tier: "advanced"},
+			"p1": {BaseURL: upstream.URL, APIKey: "ignored", Timeout: 5 * time.Second, Tier: "advanced"},
 		},
 		Routes: map[string]config.Route{
 			"chat": {
@@ -490,7 +490,7 @@ func TestReload_ConcurrentSafe(t *testing.T) {
 		Server: config.ServerConfig{Listen: ":0", RequestTimeout: 30 * time.Second},
 		Auth:   config.AuthConfig{Enabled: true, APIKeys: []config.APIKey{{Key: "test-key", ClientID: "tester"}}},
 		Providers: map[string]config.Provider{
-			"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"},
+			"p1": {BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"},
 		},
 		Routes: map[string]config.Route{
 			"chat": {Strategy: "priority", Providers: []config.RouteTarget{{Provider: "p1", Model: "m1"}}},
@@ -531,7 +531,7 @@ func TestReload_ConcurrentSafe(t *testing.T) {
 		next := &config.Config{
 			Server:    initial.Server,
 			Auth:      initial.Auth,
-			Providers: map[string]config.Provider{"p1": {Type: "openai", BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"}},
+			Providers: map[string]config.Provider{"p1": {BaseURL: upstream.URL, APIKey: "x", Timeout: 5 * time.Second, Tier: "advanced"}},
 			Routes:    map[string]config.Route{"chat": {Strategy: "priority", Providers: []config.RouteTarget{{Provider: "p1", Model: "m1"}}}},
 		}
 		if err := srv.Reload(next); err != nil {
@@ -545,3 +545,58 @@ func TestReload_ConcurrentSafe(t *testing.T) {
 	// If we got here without panicking, the test passes.
 }
 
+// ---------- Request body size limit tests ----------
+
+// TestChatCompletionsBodyTooLarge verifies that /v1/chat/completions rejects
+// payloads larger than maxRequestBodyBytes with 413 Request Entity Too Large.
+func TestChatCompletionsBodyTooLarge(t *testing.T) {
+	cfg := testConfig()
+	srv := NewWithProviders(cfg, slog.Default(), nil)
+
+	// Build a payload that exceeds maxRequestBodyBytes (32 MiB). The JSON
+	// wraps one giant string so it parses as a valid chat request structurally.
+	oversized := int(maxRequestBodyBytes) + 1024
+	padding := make([]byte, oversized)
+	for i := range padding {
+		padding[i] = 'a'
+	}
+	body := []byte(`{"model":"chat","messages":[{"role":"user","content":"`)
+	body = append(body, padding...)
+	body = append(body, []byte(`"}]}`)...)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+
+	if w.Code != 413 {
+		t.Fatalf("oversized chat status = %d, want 413; body = %s", w.Code, w.Body.String()[:min(200, w.Body.Len())])
+	}
+}
+
+// TestMessagesBodyTooLarge verifies that /v1/messages rejects payloads larger
+// than maxRequestBodyBytes with 413.
+func TestMessagesBodyTooLarge(t *testing.T) {
+	cfg := testConfig()
+	srv := NewWithProviders(cfg, slog.Default(), nil)
+
+	oversized := int(maxRequestBodyBytes) + 1024
+	padding := make([]byte, oversized)
+	for i := range padding {
+		padding[i] = 'a'
+	}
+	body := []byte(`{"model":"chat","max_tokens":10,"messages":[{"role":"user","content":"`)
+	body = append(body, padding...)
+	body = append(body, []byte(`"}]}`)...)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("x-api-key", "test-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+
+	if w.Code != 413 {
+		t.Fatalf("oversized messages status = %d, want 413; body = %s", w.Code, w.Body.String()[:min(200, w.Body.Len())])
+	}
+}

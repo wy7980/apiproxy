@@ -24,7 +24,6 @@ import (
 	"github.com/wangyong/apiproxy/internal/metrics"
 	"github.com/wangyong/apiproxy/internal/provider"
 	"github.com/wangyong/apiproxy/internal/provider/anthropic"
-	"github.com/wangyong/apiproxy/internal/provider/openai"
 	"github.com/wangyong/apiproxy/internal/router"
 	"github.com/wangyong/apiproxy/internal/storage"
 )
@@ -68,27 +67,17 @@ func buildSnapshot(cfg *config.Config) (*snapshot, error) {
 	providers := make(map[string]provider.Provider, len(cfg.Providers))
 	for name, p := range cfg.Providers {
 		apiKey := cfg.ProviderAPIKey(name)
-		switch p.Type {
-		case "openai":
-			httpClient := &http.Client{Timeout: p.Timeout}
-			providers[name] = openai.New(provider.Config{
-				Name:    name,
-				BaseURL: p.BaseURL,
-				APIKey:  apiKey,
-				Timeout: p.Timeout,
-			}, httpClient)
-		case "anthropic":
-			httpClient := &http.Client{Timeout: p.Timeout}
-			providers[name] = anthropic.New(provider.Config{
-				Name:       name,
-				BaseURL:    p.BaseURL,
-				APIKey:     apiKey,
-				Timeout:    p.Timeout,
-				AuthHeader: p.AuthHeader,
-			}, httpClient)
-		default:
-			return nil, fmt.Errorf("unsupported provider type %q for %q", p.Type, name)
-		}
+		httpClient := &http.Client{Timeout: p.Timeout}
+		// Single transparent provider: protocol (OpenAI vs Anthropic) is decided
+		// by the client's request path, not by a static type field. One provider
+		// serves both /v1/chat/completions and /v1/messages.
+		providers[name] = anthropic.New(provider.Config{
+			Name:       name,
+			BaseURL:    p.BaseURL,
+			APIKey:     apiKey,
+			Timeout:    p.Timeout,
+			AuthHeader: p.AuthHeader,
+		}, httpClient)
 	}
 
 	return &snapshot{
@@ -218,9 +207,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestID := newRequestID()
 	start := time.Now()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "read_body_error", err.Error())
+		status := http.StatusBadRequest
+		msg := err.Error()
+		if errors.Is(err, http.ErrBodyReadAfterClose) || strings.Contains(msg, "http: request body too large") {
+			status = http.StatusRequestEntityTooLarge
+			msg = "request body too large"
+		}
+		writeOpenAIError(w, status, "read_body_error", msg)
 		return
 	}
 
@@ -282,7 +278,7 @@ func (s *Server) handleNonStream(
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
-		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: false}
+		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: false}
 		resp, perr := prov.Chat(ctx, chReq)
 		cancel()
 
@@ -302,6 +298,12 @@ func (s *Server) handleNonStream(
 			w.Header().Set("X-Request-Id", requestID)
 			w.WriteHeader(resp.StatusCode)
 			_, _ = w.Write(resp.Body)
+
+			s.logger.Debug("openai proxy downstream response (non-stream)",
+				"request_id", requestID, "client_id", clientID,
+				"provider", target.Provider, "model", target.Model,
+				"status", resp.StatusCode, "body_bytes", len(resp.Body),
+				"resp_body", truncStr(string(resp.Body), maxLogBody))
 
 			metrics.RecordRequest(metrics.RequestLog{
 				RequestID:        requestID,
@@ -399,7 +401,7 @@ func (s *Server) handleStream(
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
-		chReq := &provider.ChatRequest{Body: upstreamBody, Model: target.Model, Stream: true}
+		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
 		ch, perr := prov.ChatStream(ctx, chReq)
 
 		if perr != nil {
@@ -538,9 +540,16 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	requestID := newRequestID()
 	start := time.Now()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		status := http.StatusBadRequest
+		msg := err.Error()
+		if strings.Contains(msg, "http: request body too large") {
+			status = http.StatusRequestEntityTooLarge
+			msg = "request body too large"
+		}
+		writeAnthropicError(w, status, "invalid_request_error", msg)
 		return
 	}
 
@@ -1033,6 +1042,10 @@ func maybeExtractUsage(chunk []byte, prompt, completion int) (int, int) {
 
 const (
 	maxLogBody = 4096
+	// maxRequestBodyBytes caps inbound chat/messages bodies. LLM prompts can
+	// be large (long context windows), so allow 32 MiB which comfortably
+	// covers typical use while blocking unbounded memory growth.
+	maxRequestBodyBytes = 32 << 20
 )
 
 func redactHeaders(h http.Header) map[string]string {

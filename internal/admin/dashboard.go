@@ -259,7 +259,7 @@ const dashboardHTML = `<!doctype html>
             <table class="config-table">
               <thead>
                 <tr>
-                  <th>Name</th><th>Type</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
+                  <th>Name</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
                 </tr>
               </thead>
               <tbody id="providersBody"></tbody>
@@ -577,24 +577,17 @@ function renderProviders() {
     body.appendChild(providerRow(cfgState.providers[i], i));
   }
   if (cfgState.providers.length === 0) {
-    body.appendChild(el("tr", null, [el("td", {colspan: "8", class: "muted"}, ["暂无 provider，点右上角新增"])]));
+    body.appendChild(el("tr", null, [el("td", {colspan: "7", class: "muted"}, ["暂无 provider，点右上角新增"])]));
   }
 }
 
 function providerRow(p, idx) {
-  var typeSel = el("select", null, [
-    el("option", {value: "openai"}, ["openai"]),
-    el("option", {value: "anthropic"}, ["anthropic"])
-  ]);
-  typeSel.value = p.type || "openai";
-  typeSel.addEventListener("change", function() { cfgState.providers[idx].type = typeSel.value; });
-
   var authSel = el("select", null, [
-    el("option", {value: "x-api-key"}, ["x-api-key"]),
+    el("option", {value: "both"}, ["both (推荐)"]),
     el("option", {value: "authorization"}, ["authorization"]),
-    el("option", {value: "both"}, ["both"])
+    el("option", {value: "x-api-key"}, ["x-api-key"])
   ]);
-  authSel.value = p.auth_header || "x-api-key";
+  authSel.value = p.auth_header || "both";
   authSel.addEventListener("change", function() { cfgState.providers[idx].auth_header = authSel.value; });
 
   var tierSel = el("select", null, [
@@ -635,7 +628,6 @@ function providerRow(p, idx) {
 
   return el("tr", null, [
     el("td", null, [nameInput]),
-    el("td", null, [typeSel]),
     el("td", null, [urlInput]),
     el("td", null, [keyInput]),
     el("td", null, [keyEnvInput]),
@@ -648,11 +640,10 @@ function providerRow(p, idx) {
 function addProvider() {
   cfgState.providers.push({
     name: "provider-" + (cfgState.providers.length + 1),
-    type: "openai",
     base_url: "",
     api_key: "",
     api_key_env: "",
-    auth_header: "x-api-key",
+    auth_header: "both",
     timeout: "60s",
     tier: ""
   });

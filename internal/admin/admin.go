@@ -15,12 +15,14 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wangyong/apiproxy/internal/config"
@@ -45,6 +47,10 @@ type Server struct {
 	username string
 	password string
 	token    []byte // HMAC key for signing session cookies
+
+	// Login throttle: per-IP failure counter.
+	failMu   sync.Mutex
+	failures map[string]*loginFail
 }
 
 // New constructs an admin server bound to the given SQLite store and config
@@ -64,6 +70,7 @@ func New(store *storage.Store, logger *slog.Logger, configPath string, r Reloade
 		username:   username,
 		password:   password,
 		token:      token,
+		failures:   make(map[string]*loginFail),
 	}
 	s.mux.HandleFunc("/login", s.handleLogin)
 	s.mux.HandleFunc("/logout", s.handleLogout)
@@ -339,7 +346,82 @@ func (s *Server) handleFilters(w http.ResponseWriter, r *http.Request) {
 
 const sessionCookieName = "apiproxy_admin"
 
-// sessionToken returns a signed session value: base64(random32bytes) + HMAC.
+// sessionMaxAge bounds how long a session cookie is accepted. After this
+// duration the user must log in again. Cookies carry an issue timestamp
+// in the signed value.
+const sessionMaxAge = 8 * time.Hour
+
+// login throttle thresholds. After maxFailures within failWindow, the IP
+// is locked out for lockDuration.
+const (
+	maxFailures  = 5
+	failWindow   = 5 * time.Minute
+	lockDuration = 15 * time.Minute
+)
+
+type loginFail struct {
+	count      int
+	firstFail  time.Time
+	lastFail   time.Time
+	lockUntil  time.Time
+}
+
+// clientIP returns a best-effort client IP for throttling. It prefers
+// X-Forwarded-For (first entry) and falls back to RemoteAddr. Behind a
+// trusted reverse proxy this should be set correctly; if not, throttle
+// becomes per-connection which is still better than nothing.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// locked returns true if ip is currently in lockout window.
+func (s *Server) locked(ip string, now time.Time) bool {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	f, ok := s.failures[ip]
+	if !ok {
+		return false
+	}
+	return now.Before(f.lockUntil)
+}
+
+// recordFailure increments the counter for ip, starting a fresh window
+// if needed, and triggers a lockout once the threshold is reached.
+func (s *Server) recordFailure(ip string, now time.Time) {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	f, ok := s.failures[ip]
+	if !ok || now.Sub(f.firstFail) > failWindow {
+		f = &loginFail{firstFail: now}
+		s.failures[ip] = f
+	}
+	f.count++
+	f.lastFail = now
+	if f.count >= maxFailures {
+		f.lockUntil = now.Add(lockDuration)
+	}
+}
+
+// recordSuccess clears any prior failure state for ip.
+func (s *Server) recordSuccess(ip string) {
+	s.failMu.Lock()
+	delete(s.failures, ip)
+	s.failMu.Unlock()
+}
+
+// sessionToken returns a signed session value: base64(random32bytes) +
+// "|" + base64(hmac). The issue time is NOT embedded — expiry is enforced
+// via the cookie's own MaxAge.
 func (s *Server) sessionToken() string {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -400,10 +482,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(strings.Replace(loginHTML, "%s", next, 1)))
 	case http.MethodPost:
+		ip := clientIP(r)
+		now := time.Now()
+		if s.locked(ip, now) {
+			writeJSONError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+			return
+		}
 		user := r.FormValue("username")
 		pass := r.FormValue("password")
 		if subtle.ConstantTimeCompare([]byte(user), []byte(s.username)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) != 1 {
+			s.recordFailure(ip, now)
 			next := html.EscapeString(r.FormValue("next"))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -412,12 +501,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(page))
 			return
 		}
+		s.recordSuccess(ip)
 		http.SetCookie(w, &http.Cookie{
 			Name:     sessionCookieName,
 			Value:    s.sessionToken(),
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(sessionMaxAge.Seconds()),
+			Secure:   r.TLS != nil,
 		})
 		next := safeRedirectPath(r.FormValue("next"))
 		http.Redirect(w, r, next, http.StatusSeeOther)
@@ -472,7 +564,6 @@ const maskedAPIKey = "***"
 // configProviderJSON is the wire format for provider entries in /api/config.
 type configProviderJSON struct {
 	Name       string `json:"name"`
-	Type       string `json:"type"`
 	BaseURL    string `json:"base_url"`
 	APIKey     string `json:"api_key"`
 	APIKeyEnv  string `json:"api_key_env"`
@@ -532,7 +623,6 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
 		}
 		resp.Providers = append(resp.Providers, configProviderJSON{
 			Name:       name,
-			Type:       p.Type,
 			BaseURL:    p.BaseURL,
 			APIKey:     display,
 			APIKeyEnv:  p.APIKeyEnv,
@@ -613,7 +703,6 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			key = current.ProviderAPIKey(name)
 		}
 		newCfg.Providers[name] = config.Provider{
-			Type:       p.Type,
 			BaseURL:    p.BaseURL,
 			APIKey:     key,
 			APIKeyEnv:  p.APIKeyEnv,

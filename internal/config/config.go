@@ -29,8 +29,8 @@ type ServerConfig struct {
 }
 
 type AuthConfig struct {
-	Enabled bool      `yaml:"enabled"`
-	APIKeys []APIKey  `yaml:"api_keys"`
+	Enabled bool     `yaml:"enabled"`
+	APIKeys []APIKey `yaml:"api_keys"`
 }
 
 type APIKey struct {
@@ -39,15 +39,15 @@ type APIKey struct {
 }
 
 type Provider struct {
-	Type       string        `yaml:"type"`
-	BaseURL    string        `yaml:"base_url"`
-	APIKey     string        `yaml:"api_key"`
-	APIKeyEnv  string        `yaml:"api_key_env"`
-	Timeout    time.Duration `yaml:"timeout"`
-	Tier       string        `yaml:"tier"`
-	// AuthHeader controls how the API key is sent upstream for protocol-native
-	// (anthropic) providers. "x-api-key" (default), "authorization", or "both".
-	// Useful for gateways (new-api/one-api) that only accept Bearer auth.
+	BaseURL   string        `yaml:"base_url"`
+	APIKey    string        `yaml:"api_key"`
+	APIKeyEnv string        `yaml:"api_key_env"`
+	Timeout   time.Duration `yaml:"timeout"`
+	Tier      string        `yaml:"tier"`
+	// AuthHeader controls how the API key is sent upstream. "both" (default)
+	// sends both x-api-key and Authorization: Bearer for maximum compatibility
+	// with gateways like new-api/one-api. "authorization" sends only Bearer;
+	// "x-api-key" sends only the Anthropic-style header.
 	AuthHeader string `yaml:"auth_header"`
 }
 
@@ -58,12 +58,12 @@ type Route struct {
 }
 
 type FallbackConfig struct {
-	Enabled         bool    `yaml:"enabled"`
-	MaxAttempts     int     `yaml:"max_attempts"`
-	OnStatus        []int   `yaml:"on_status"`
-	OnTimeout       bool    `yaml:"on_timeout"`
-	OnConnectError  bool    `yaml:"on_connect_error"`
-	AllowDowngrade  bool    `yaml:"allow_downgrade"`
+	Enabled        bool  `yaml:"enabled"`
+	MaxAttempts    int   `yaml:"max_attempts"`
+	OnStatus       []int `yaml:"on_status"`
+	OnTimeout      bool  `yaml:"on_timeout"`
+	OnConnectError bool  `yaml:"on_connect_error"`
+	AllowDowngrade bool  `yaml:"allow_downgrade"`
 }
 
 type RouteTarget struct {
@@ -90,13 +90,21 @@ type MetricsConfig struct {
 }
 
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+	Level  string        `yaml:"level"`
+	Format string        `yaml:"format"`
+	File   LogFileConfig `yaml:"file"`
+}
+
+type LogFileConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Dir     string `yaml:"dir"`
+	MaxDays int    `yaml:"max_days"`
+	MaxSize int    `yaml:"max_size"`
 }
 
 type StorageConfig struct {
-	Path      string        `yaml:"path"`
-	Enabled   bool          `yaml:"enabled"`
+	Path    string `yaml:"path"`
+	Enabled bool   `yaml:"enabled"`
 	// Retention is how long to keep per-day event shards. Events whose
 	// shard day is older than (now - Retention) are dropped via DROP TABLE.
 	// Default is 7 * 24h. Events are stored in daily shards named
@@ -105,8 +113,10 @@ type StorageConfig struct {
 }
 
 type AdminServerConfig struct {
-	Listen string `yaml:"listen"`
-	Enabled bool  `yaml:"enabled"`
+	Listen       string `yaml:"listen"`
+	Enabled      bool   `yaml:"enabled"`
+	UsernameEnv  string `yaml:"username_env"`
+	PasswordEnv  string `yaml:"password_env"`
 }
 
 func Load(path string) (*Config, error) {
@@ -128,7 +138,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	cfg.ApplyDefaults()
+	if err := cfg.ApplyDefaults(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -159,7 +171,7 @@ func (c *Config) Validate() error {
 }
 
 // ApplyDefaults fills in zero-value fields with sane defaults.
-func (c *Config) ApplyDefaults() {
+func (c *Config) ApplyDefaults() error {
 	if c.Server.RequestTimeout == 0 {
 		c.Server.RequestTimeout = 120 * time.Second
 	}
@@ -174,8 +186,8 @@ func (c *Config) ApplyDefaults() {
 			p.Timeout = 60 * time.Second
 			c.Providers[name] = p
 		}
-		if p.Type == "" {
-			p.Type = "openai"
+		if p.AuthHeader == "" {
+			p.AuthHeader = "both"
 			c.Providers[name] = p
 		}
 	}
@@ -210,7 +222,25 @@ func (c *Config) ApplyDefaults() {
 		if c.Admin.Listen == "" {
 			c.Admin.Listen = ":8081"
 		}
+		if c.Admin.UsernameEnv == "" {
+			c.Admin.UsernameEnv = "APIPROXY_ADMIN_USER"
+		}
+		if c.Admin.PasswordEnv == "" {
+			c.Admin.PasswordEnv = "APIPROXY_ADMIN_PASS"
+		}
 	}
+	if c.Logging.File.Enabled {
+		if c.Logging.File.Dir == "" {
+			return fmt.Errorf("logging.file.dir is required when logging.file is enabled")
+		}
+		if c.Logging.File.MaxDays <= 0 {
+			c.Logging.File.MaxDays = 7
+		}
+		if c.Logging.File.MaxSize <= 0 {
+			c.Logging.File.MaxSize = 100
+		}
+	}
+	return nil
 }
 
 // ProviderAPIKey resolves a provider's API key from inline config or env var.

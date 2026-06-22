@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -239,8 +240,8 @@ func testReloaderConfig() *config.Config {
 	return &config.Config{
 		Server: config.ServerConfig{Listen: ":0"},
 		Providers: map[string]config.Provider{
-			"openai":   {Type: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-real-key-123", Timeout: 60 * time.Second},
-			"deepseek": {Type: "openai", BaseURL: "https://api.deepseek.com/v1", APIKeyEnv: "DEEPSEEK_KEY", Timeout: 60 * time.Second},
+			"openai":   {BaseURL: "https://api.openai.com/v1", APIKey: "sk-real-key-123", Timeout: 60 * time.Second},
+			"deepseek": {BaseURL: "https://api.deepseek.com/v1", APIKeyEnv: "DEEPSEEK_KEY", Timeout: 60 * time.Second},
 		},
 		Routes: map[string]config.Route{
 			"chat": {
@@ -329,7 +330,7 @@ func TestPUTConfig_PreservesMaskedKey(t *testing.T) {
 	// Build a PUT payload where the API key is the masked placeholder.
 	payload := configResponseJSON{
 		Providers: []configProviderJSON{
-			{Name: "openai", Type: "openai", BaseURL: "https://api.openai.com/v1", APIKey: maskedAPIKey, Timeout: "60s"},
+			{Name: "openai", BaseURL: "https://api.openai.com/v1", APIKey: maskedAPIKey, Timeout: "60s"},
 		},
 		Routes: []configRouteJSON{
 			{Name: "chat", Strategy: "priority", Fallback: configFallbackJSON{Enabled: true, MaxAttempts: 2, OnStatus: []int{429, 500}}, Providers: []configRouteProviderJSON{{Provider: "openai", Model: "gpt-4o-mini"}}},
@@ -378,7 +379,7 @@ func TestPUTConfig_RejectsInvalid(t *testing.T) {
 	// Route references a provider that doesn't exist in providers map.
 	payload := configResponseJSON{
 		Providers: []configProviderJSON{
-			{Name: "openai", Type: "openai", BaseURL: "https://api.openai.com/v1", APIKey: maskedAPIKey, Timeout: "60s"},
+			{Name: "openai", BaseURL: "https://api.openai.com/v1", APIKey: maskedAPIKey, Timeout: "60s"},
 		},
 		Routes: []configRouteJSON{
 			{Name: "chat", Strategy: "priority", Providers: []configRouteProviderJSON{{Provider: "nonexistent", Model: "fake"}}},
@@ -541,5 +542,168 @@ func TestLogoutClearsCookieAndRedirects(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("post-logout status = %d, want 303 (redirect to login)", w.Code)
+	}
+}
+
+// ---- Login throttle + cookie-attribute tests ----
+
+func TestClientIPUsesForwardedFor(t *testing.T) {
+	cases := []struct {
+		name       string
+		xff        string
+		remoteAddr string
+		want       string
+	}{
+		{name: "single xff", xff: "203.0.113.5", remoteAddr: "10.0.0.1:1234", want: "203.0.113.5"},
+		{name: "multi xff uses first", xff: "203.0.113.5, 70.0.0.1", remoteAddr: "10.0.0.1:1234", want: "203.0.113.5"},
+		{name: "no xff falls back to RemoteAddr", xff: "", remoteAddr: "10.0.0.1:1234", want: "10.0.0.1"},
+		{name: "no xff no port returns raw", xff: "", remoteAddr: "10.0.0.1", want: "10.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				req.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			got := clientIP(req)
+			if got != tc.want {
+				t.Fatalf("clientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRecordFailureLocksAndSuccessClears verifies the throttle state machine:
+// maxFailures-1 failures do not lock, the maxFailures-th triggers lockout,
+// and recordSuccess clears the state.
+func TestRecordFailureLocksAndSuccessClears(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	const ip = "192.0.2.10"
+	now := time.Now()
+
+	for i := 1; i < maxFailures; i++ {
+		srv.recordFailure(ip, now)
+		if srv.locked(ip, now) {
+			t.Fatalf("locked after %d failures, expected only after %d", i, maxFailures)
+		}
+	}
+
+	srv.recordFailure(ip, now)
+	if !srv.locked(ip, now) {
+		t.Fatalf("expected lock after %d failures", maxFailures)
+	}
+	if !srv.locked(ip, now.Add(lockDuration-1*time.Second)) {
+		t.Fatalf("should still be locked just before lockDuration elapses")
+	}
+	if srv.locked(ip, now.Add(lockDuration+1*time.Second)) {
+		t.Fatalf("should be unlocked after lockDuration elapses")
+	}
+
+	srv.recordSuccess(ip)
+	if srv.locked(ip, now) {
+		t.Fatal("locked after recordSuccess")
+	}
+}
+
+// TestLoginThrottleReturns429 verifies that after maxFailures bad logins from
+// the same IP, subsequent attempts return 429 instead of 401.
+func TestLoginThrottleReturns429(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	doPost := func() int {
+		form := strings.NewReader("username=admin&password=wrong")
+		req := httptest.NewRequest(http.MethodPost, "/login", form)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "198.51.100.7:5555"
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w.Code
+	}
+
+	for i := 0; i < maxFailures; i++ {
+		if code := doPost(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want 401", i+1, code)
+		}
+	}
+	if code := doPost(); code != http.StatusTooManyRequests {
+		t.Fatalf("post-lockout status = %d, want 429", code)
+	}
+}
+
+// TestLoginPOSTValidSetsCookieAttributes verifies HttpOnly, SameSite=Lax, and
+// Max-Age=sessionMaxAge on the session cookie. Secure is validated separately
+// because httptest.NewRequest does not populate r.TLS on its own.
+func TestLoginPOSTValidSetsCookieAttributes(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	form := strings.NewReader("username=admin&password=test-pass")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303", w.Code)
+	}
+
+	cookies := w.Result().Cookies()
+	var c *http.Cookie
+	for _, ck := range cookies {
+		if ck.Name == sessionCookieName {
+			c = ck
+			break
+		}
+	}
+	if c == nil {
+		t.Fatalf("no %s cookie in response", sessionCookieName)
+	}
+	if !c.HttpOnly {
+		t.Errorf("HttpOnly = false, want true")
+	}
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("SameSite = %v, want Lax", c.SameSite)
+	}
+	if c.MaxAge != int(sessionMaxAge.Seconds()) {
+		t.Errorf("MaxAge = %d, want %d", c.MaxAge, int(sessionMaxAge.Seconds()))
+	}
+	if c.Secure {
+		t.Errorf("Secure = true, want false for non-TLS request")
+	}
+}
+
+// TestLoginPOSTSetsSecureCookieWhenTLS verifies the Secure flag is set when
+// the login arrives over TLS.
+func TestLoginPOSTSetsSecureCookieWhenTLS(t *testing.T) {
+	srv, store := setupServer(t)
+	defer store.Close()
+
+	form := strings.NewReader("username=admin&password=test-pass")
+	req := httptest.NewRequest(http.MethodPost, "/login", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.TLS = &tls.ConnectionState{Version: tls.VersionTLS12}
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303", w.Code)
+	}
+	var c *http.Cookie
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			c = ck
+			break
+		}
+	}
+	if c == nil {
+		t.Fatalf("no %s cookie in response", sessionCookieName)
+	}
+	if !c.Secure {
+		t.Errorf("Secure = false for TLS request, want true")
 	}
 }

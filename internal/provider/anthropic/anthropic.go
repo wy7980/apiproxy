@@ -1,11 +1,13 @@
-// Package anthropic implements a transparent proxy provider for the native
-// Anthropic Messages API (/v1/messages).
+// Package anthropic implements a transparent proxy provider.
 //
-// Unlike the OpenAI provider, this one performs NO format conversion at all.
-// It forwards the request body verbatim to an Anthropic-compatible upstream
-// and streams/returns the response verbatim. The upstream is responsible for
-// model adaptation and any format handling. This keeps Claude Code and other
-// Anthropic clients talking to the proxy exactly as if it were api.anthropic.com.
+// It is NOT Anthropic-specific despite the package name (historical): it
+// forwards the downstream client's request path, headers and body verbatim to
+// an upstream, and streams/returns the response verbatim. The protocol spoken
+// (OpenAI Chat Completions vs Anthropic Messages) is decided entirely by the
+// client's request path — whatever path the client used is the path sent
+// upstream, so one provider can serve both /v1/chat/completions and
+// /v1/messages transparently. The only thing this provider contributes is the
+// upstream host, the auth header, and timeout.
 package anthropic
 
 import (
@@ -23,22 +25,38 @@ import (
 	"github.com/wangyong/apiproxy/internal/provider"
 )
 
-// APIVersion is the Anthropic API version header sent on every request.
-const APIVersion = "2023-06-01"
+// DefaultMessagesPath is used when ChatRequest.Path is empty. We default to the
+// Anthropic messages path because the proxy historically served Claude Code,
+// but in practice the handlers always pass the client path through.
+const DefaultMessagesPath = "/v1/messages"
 
-// DefaultMessagesPath is used when ChatRequest.Path is empty.
-const DefaultMessagesPath = "/v1/messages"// AuthHeaderMode controls how the provider's API key is sent upstream.
+// AuthHeaderMode controls how the provider's API key is sent upstream.
 type AuthHeaderMode string
 
 const (
 	// AuthXApiKey sends the key as x-api-key (official Anthropic convention).
 	AuthXApiKey AuthHeaderMode = "x-api-key"
-	// AuthBearer sends the key as Authorization: Bearer <key>
-	// (useful for new-api / one-api gateways that only accept Bearer auth).
+	// AuthBearer sends the key as Authorization: Bearer <key>.
 	AuthBearer AuthHeaderMode = "authorization"
-	// AuthBoth sends the key in both headers for maximum compatibility.
+	// AuthBoth sends the key in both headers for maximum compatibility. This is
+	// the default for a transparent proxy: gateways like new-api/one-api often
+	// accept only one of the two, so emitting both means "just works".
 	AuthBoth AuthHeaderMode = "both"
 )
+
+// hopByHopHeaders are stripped per RFC 7230 §6.1; they are per-connection and
+// must not be forwarded by a proxy.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
 
 type Provider struct {
 	name       string
@@ -49,11 +67,13 @@ type Provider struct {
 	client     provider.HTTPDoer
 }
 
+// New builds a transparent provider. authHeader defaults to AuthBoth when
+// unset, for maximum upstream compatibility.
 func New(cfg provider.Config, client provider.HTTPDoer) *Provider {
 	if client == nil {
 		client = &http.Client{Timeout: cfg.Timeout}
 	}
-	auth := AuthXApiKey // default: official Anthropic convention
+	auth := AuthBoth
 	if cfg.AuthHeader != "" {
 		switch strings.ToLower(cfg.AuthHeader) {
 		case "authorization", "bearer":
@@ -74,22 +94,25 @@ func New(cfg provider.Config, client provider.HTTPDoer) *Provider {
 	}
 }
 
-// normalizeBaseURL strips path suffixes so appending ChatRequest.Path doesn't duplicate /v1.
+// normalizeBaseURL strips known API path suffixes so appending ChatRequest.Path
+// (which already carries the client's /v1/... path) doesn't duplicate them.
+// "https://h", "https://h/", "https://h/v1", "https://h/v1/messages",
+// "https://h/v1/chat/completions" all normalize to "https://h".
 func normalizeBaseURL(raw string) string {
 	s := strings.TrimRight(raw, "/")
-	if strings.HasSuffix(s, "/v1/messages") {
-		s = strings.TrimSuffix(s, "/v1/messages")
+	for _, suffix := range []string{"/v1/chat/completions", "/v1/messages", "/chat/completions", "/messages", "/v1"} {
+		if strings.HasSuffix(s, suffix) {
+			s = strings.TrimSuffix(s, suffix)
+			break
+		}
 	}
-	if strings.HasSuffix(s, "/v1") {
-		s = strings.TrimSuffix(s, "/v1")
-	}
-	return s
+	return strings.TrimRight(s, "/")
 }
 
 func (p *Provider) Name() string { return p.name }
 
-// Chat performs a non-streaming Anthropic Messages request. The response body
-// is returned as-is for transparent forwarding; only usage is parsed for metrics.
+// Chat performs a non-streaming request. The response body is returned as-is
+// for transparent forwarding; only usage is parsed for metrics.
 func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
 	if req == nil || len(req.Body) == 0 {
 		return nil, errors.New("empty request body")
@@ -100,7 +123,7 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 		return nil, err
 	}
 
-	slog.Debug("anthropic upstream request",
+	slog.Debug("transparent upstream request",
 		"provider", p.name, "url", httpReq.URL.String(),
 		"method", httpReq.Method,
 		"req_headers", redactHeaders(httpReq.Header),
@@ -108,7 +131,7 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		slog.Debug("anthropic upstream transport error",
+		slog.Debug("transparent upstream transport error",
 			"provider", p.name, "url", httpReq.URL.String(), "err", err.Error())
 		return &provider.ChatResponse{Err: classifyTransport(err)}, nil
 	}
@@ -116,7 +139,7 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 
 	body, _ := io.ReadAll(resp.Body)
 
-	slog.Debug("anthropic upstream response",
+	slog.Debug("transparent upstream response",
 		"provider", p.name, "url", httpReq.URL.String(),
 		"status", resp.StatusCode,
 		"resp_headers", redactHeaders(resp.Header),
@@ -132,16 +155,16 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 		return out, nil
 	}
 	if len(body) == 0 {
-		slog.Warn("anthropic upstream returned HTTP 200 with empty body — check that base_url points to a real Anthropic-compatible endpoint",
-			"provider", p.name, "url", p.baseURL+DefaultMessagesPath)
+		slog.Warn("transparent upstream returned HTTP 200 with empty body — check that base_url points to a real API endpoint",
+			"provider", p.name, "url", httpReq.URL.String())
 	}
 	out.Usage = extractUsage(body)
 	return out, nil
 }
 
-// ChatStream performs a streaming Anthropic Messages request. On success it
-// returns a channel emitting the raw SSE chunks received from upstream, which
-// are forwarded verbatim.
+// ChatStream performs a streaming request. On success it returns a channel
+// emitting the raw SSE chunks received from upstream, which are forwarded
+// verbatim.
 func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<-chan provider.StreamChunk, error) {
 	if req == nil || len(req.Body) == 0 {
 		return nil, errors.New("empty request body")
@@ -152,7 +175,7 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 		return nil, err
 	}
 
-	slog.Debug("anthropic upstream stream request",
+	slog.Debug("transparent upstream stream request",
 		"provider", p.name, "url", httpReq.URL.String(),
 		"method", httpReq.Method,
 		"req_headers", redactHeaders(httpReq.Header),
@@ -160,12 +183,12 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		slog.Debug("anthropic upstream stream transport error",
+		slog.Debug("transparent upstream stream transport error",
 			"provider", p.name, "url", httpReq.URL.String(), "err", err.Error())
 		return nil, classifyTransport(err)
 	}
 
-	slog.Debug("anthropic upstream stream response headers",
+	slog.Debug("transparent upstream stream response headers",
 		"provider", p.name, "url", httpReq.URL.String(),
 		"status", resp.StatusCode,
 		"resp_headers", redactHeaders(resp.Header))
@@ -173,7 +196,7 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		slog.Debug("anthropic upstream stream error body",
+		slog.Debug("transparent upstream stream error body",
 			"provider", p.name, "status", resp.StatusCode,
 			"body", truncStr(string(body), maxLogBody))
 		return nil, classifyStatus(resp.StatusCode, string(body))
@@ -201,7 +224,7 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 					ch <- provider.StreamChunk{Data: append([]byte(nil), event...)}
 					chunkCount++
 					if chunkCount <= 3 {
-						slog.Debug("anthropic upstream stream chunk",
+						slog.Debug("transparent upstream stream chunk",
 							"provider", p.name, "chunk_num", chunkCount,
 							"data", truncStr(string(event), maxLogChunk))
 					}
@@ -216,7 +239,7 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 				if len(carry) > 0 {
 					ch <- provider.StreamChunk{Data: append([]byte(nil), carry...)}
 				}
-				slog.Debug("anthropic upstream stream ended",
+				slog.Debug("transparent upstream stream ended",
 					"provider", p.name, "total_chunks", chunkCount,
 					"eof", errors.Is(readErr, io.EOF))
 				return
@@ -227,12 +250,12 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 	return ch, nil
 }
 
-// newRequest builds the upstream POST, merging client Anthropic headers into
-// the upstream request. Only the auth header(s) are replaced with the
-// provider's own API key; all other Anthropic headers are forwarded as-is.
-// The request path is a transparent passthrough: whatever path the downstream
-// client sent (e.g. /v1/messages or /v1/messages/count_tokens) is forwarded
-// to the upstream as-is, making the proxy truly transparent.
+// newRequest builds the upstream POST. The URL is normalize(host) + client
+// path, making the proxy fully transparent: whatever path the downstream client
+// sent (e.g. /v1/messages or /v1/chat/completions) is forwarded to the upstream
+// as-is. Client headers are copied through verbatim except for hop-by-hop
+// headers, Content-Length / Content-Encoding (which are recomputed), and auth
+// (which is replaced with the provider's own key).
 func (p *Provider) newRequest(ctx context.Context, req *provider.ChatRequest) (*http.Request, error) {
 	path := req.Path
 	if path == "" {
@@ -247,41 +270,53 @@ func (p *Provider) newRequest(ctx context.Context, req *provider.ChatRequest) (*
 	return httpReq, nil
 }
 
-// applyHeaders sets the upstream request headers. It always sets Content-Type
-// and Accept, then merges Anthropic-specific headers from the client request.
-// The auth header is set based on the provider's authHeader mode.
+// applyHeaders copies the client's request headers onto the upstream request
+// verbatim (minus hop-by-hop, Content-Length, Content-Encoding and auth), then
+// injects the provider's API key per the configured auth mode. This makes the
+// proxy transparent for BOTH OpenAI-style clients (whose Authorization we
+// overwrite with the provider key) and Anthropic-style clients (whose
+// anthropic-version / anthropic-beta headers ride along untouched).
 func (p *Provider) applyHeaders(req *http.Request, clientHeaders http.Header) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	// Forward Anthropic protocol headers from the client.
-	// This is critical: Claude Code sends anthropic-version and anthropic-beta
-	// headers that upstream services (like new-api) need to process correctly.
 	if clientHeaders != nil {
-		for _, h := range []string{
-			"Anthropic-Version",
-			"Anthropic-Beta",
-		} {
-			if vals := clientHeaders.Values(h); len(vals) > 0 {
-				for _, v := range vals {
-					req.Header.Add(h, v)
+		for k, vs := range clientHeaders {
+			lk := strings.ToLower(k)
+			switch lk {
+			case "content-length", "content-encoding":
+				continue
+			}
+			skip := false
+			for _, h := range hopByHopHeaders {
+				if strings.EqualFold(k, h) {
+					skip = true
+					break
 				}
+			}
+			if skip {
+				continue
+			}
+			for _, v := range vs {
+				req.Header.Add(k, v)
 			}
 		}
 	}
 
-	// If the client didn't send Anthropic-Version, add our default.
-	if req.Header.Get("Anthropic-Version") == "" {
-		req.Header.Set("Anthropic-Version", APIVersion)
+	// Sensible defaults if the client didn't send them.
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
 	}
 
-	// Auth: set the provider's API key based on authHeader mode.
+	// Auth: replace any client-supplied credential with the provider's own key.
 	if p.apiKey != "" {
 		switch p.authHeader {
 		case AuthXApiKey:
 			req.Header.Set("x-api-key", p.apiKey)
+			req.Header.Del("Authorization")
 		case AuthBearer:
 			req.Header.Set("Authorization", "Bearer "+p.apiKey)
+			req.Header.Del("x-api-key")
 		case AuthBoth:
 			req.Header.Set("x-api-key", p.apiKey)
 			req.Header.Set("Authorization", "Bearer "+p.apiKey)
@@ -335,22 +370,40 @@ func classifyStatus(code int, body string) *provider.Error {
 	return &provider.Error{StatusCode: code, Kind: kind, Message: msg}
 }
 
-// extractUsage pulls token usage from an Anthropic Messages response body.
+// extractUsage pulls token usage from a response body. It tries both the
+// OpenAI field names (prompt_tokens / completion_tokens / total_tokens) and the
+// Anthropic field names (input_tokens / output_tokens) so it works regardless
+// of which protocol the client spoke. Best-effort: a parse failure just yields
+// zero usage and never affects the response.
 func extractUsage(body []byte) provider.Usage {
 	var parsed struct {
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(body, &parsed) != nil {
 		return provider.Usage{}
 	}
-	in, out := parsed.Usage.InputTokens, parsed.Usage.OutputTokens
+	in := parsed.Usage.PromptTokens
+	if in == 0 {
+		in = parsed.Usage.InputTokens
+	}
+	out := parsed.Usage.CompletionTokens
+	if out == 0 {
+		out = parsed.Usage.OutputTokens
+	}
+	total := parsed.Usage.TotalTokens
+	if total == 0 {
+		total = in + out
+	}
 	return provider.Usage{
 		PromptTokens:     in,
 		CompletionTokens: out,
-		TotalTokens:      in + out,
+		TotalTokens:      total,
 	}
 }
 

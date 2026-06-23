@@ -181,7 +181,7 @@ go test ./...
 
 ## 日志轮转
 
-`logging.file.enabled: true` 时，除 stdout 外把日志写入 `dir/detail-YYYYMMDD.log`：
+`logging.file.enabled: true`（默认开启）时，除 stdout 外把日志写入 `dir/detail-YYYYMMDD.log`：
 
 - 非当天的日志文件自动 gzip 为 `.log.gz`。
 - 超过 `max_days` 的文件（含压缩）自动删除。

@@ -148,11 +148,12 @@ logging:
   level: info
   format: json
   file:
-    # When enabled, also write logs to detail-YYYYMMDD.log under dir.
-    # Non-current-day files are gzipped to .log.gz; files older than
-    # max_days are deleted. max_size is per-file MB (size-exceeded files
-    # roll into detail-YYYYMMDD.N.log).
-    enabled: false
+    # Enabled by default: logs are also written to detail-YYYYMMDD.log under
+    # dir (in addition to stdout). Non-current-day files are gzipped to
+    # .log.gz; files older than max_days are deleted. max_size is per-file MB
+    # (size-exceeded files roll into detail-YYYYMMDD.N.log). Set enabled: false
+    # to disable file logging.
+    enabled: true
     dir: "logs"
     max_days: 7
     max_size: 100

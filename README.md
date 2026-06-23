@@ -186,6 +186,7 @@ go test ./...
 - 非当天的日志文件自动 gzip 为 `.log.gz`。
 - 超过 `max_days` 的文件（含压缩）自动删除。
 - 单文件超过 `max_size` MB 时按序号滚动为 `detail-YYYYMMDD.N.log`。
+- **注意**: LLM 请求/响应明细（包括 client request、upstream request/response、stream chunk 等）当前使用 `debug` 级别日志；如果 `logging.level: info`，这些明细不会写入文件，只会记录 `info / warn / error` 级别日志。仪表板和 stats 的请求统计来自 SQLite `storage`，不依赖 debug 日志。
 
 ```yaml
 logging:
@@ -196,6 +197,13 @@ logging:
     dir: "logs"
     max_days: 7
     max_size: 100   # 单文件 100 MB
+```
+
+如果希望日志文件记录每次 LLM 调用的完整明细，请改为：
+
+```yaml
+logging:
+  level: debug
 ```
 
 ## 数据持久化

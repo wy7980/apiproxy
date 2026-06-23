@@ -214,7 +214,6 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="card full">
         <h2>模型 Token 总量</h2>
-        <div id="tokensChartLegend" class="chart-legend"></div>
         <div class="table-wrap">
           <table class="tokens-table">
             <thead>
@@ -225,7 +224,8 @@ const dashboardHTML = `<!doctype html>
             <tbody id="tokensBody"></tbody>
           </table>
         </div>
-        <canvas id="tokensChart" style="margin-top:14px"></canvas>
+        <div id="tokensChartLegend" class="chart-legend" style="margin-top:14px"></div>
+        <canvas id="tokensChart"></canvas>
       </div>
       <div class="card">
         <h2>延迟趋势</h2>

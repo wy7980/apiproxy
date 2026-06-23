@@ -399,6 +399,11 @@ func (s *Server) handleStream(
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		upstreamBody, err = api.InjectStreamUsageOptions(upstreamBody)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
@@ -747,6 +752,11 @@ func (s *Server) handleAnthropicStream(
 		}
 
 		upstreamBody, err := api.ReplaceModel(body, target.Model)
+		if err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		upstreamBody, err = api.InjectStreamUsageOptions(upstreamBody)
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return

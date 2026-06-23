@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestParseChatCompletionRequest(t *testing.T) {
 	got, err := ParseChatCompletionRequest([]byte(`{"model":"chat","stream":true}`))
@@ -31,4 +34,46 @@ func contains(haystack []byte, needle string) bool {
 		}
 		return false
 	}())
+}
+
+func TestInjectStreamUsageOptionsStreaming(t *testing.T) {
+	body := []byte(`{"model":"m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := InjectStreamUsageOptions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	so, _ := obj["stream_options"].(map[string]any)
+	if so == nil || so["include_usage"] != true {
+		t.Fatalf("stream_options = %v, want include_usage=true", so)
+	}
+}
+
+func TestInjectStreamUsageOptionsNonStreaming(t *testing.T) {
+	body := []byte(`{"model":"m1","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := InjectStreamUsageOptions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Non-streaming: should return the body unchanged (no stream_options injection).
+	if string(out) != string(body) {
+		t.Fatalf("non-streaming body was modified: %s", out)
+	}
+}
+
+func TestInjectStreamUsageOptionsPreservesExisting(t *testing.T) {
+	body := []byte(`{"model":"m1","stream":true,"stream_options":{"include_usage":false},"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := InjectStreamUsageOptions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	json.Unmarshal(out, &obj)
+	so, _ := obj["stream_options"].(map[string]any)
+	if so["include_usage"] != true {
+		t.Fatalf("include_usage should be forced to true, got %v", so["include_usage"])
+	}
 }

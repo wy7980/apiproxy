@@ -62,6 +62,7 @@ func main() {
 
 	logger, logCloser := log.Setup(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
 	defer logCloser.Close()
+	slog.SetDefault(logger) // so provider-layer slog.Debug/Warn also writes to file
 	metrics.Init()
 
 	srv, err := server.New(cfg, logger)

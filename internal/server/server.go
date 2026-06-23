@@ -477,6 +477,7 @@ func (s *Server) handleStream(
 				FirstTokenMs:     ftMs,
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
 				FallbackCount:    i,
 				FallbackFrom:     fallbackFrom,
 				FallbackTo:       fallbackTo,
@@ -516,6 +517,7 @@ func (s *Server) handleStream(
 			FirstTokenMs:     ftMs,
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
 			FallbackCount:    i,
 			FallbackFrom:     fallbackFrom,
 			FallbackTo:       fallbackTo,
@@ -841,6 +843,7 @@ func (s *Server) handleAnthropicStream(
 				FirstTokenMs:     ftMs,
 				PromptTokens:     inputTokens,
 				CompletionTokens: outputTokens,
+				TotalTokens:      inputTokens + outputTokens,
 				FallbackCount:    i,
 				FallbackFrom:     fallbackFrom,
 				FallbackTo:       fallbackTo,
@@ -880,6 +883,7 @@ func (s *Server) handleAnthropicStream(
 			FirstTokenMs:     ftMs,
 			PromptTokens:     inputTokens,
 			CompletionTokens: outputTokens,
+			TotalTokens:      inputTokens + outputTokens,
 			FallbackCount:    i,
 			FallbackFrom:     fallbackFrom,
 			FallbackTo:       fallbackTo,
@@ -899,9 +903,16 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string)
 	_, _ = w.Write(api.AnthropicErrorJSON(errType, msg))
 }
 
-// maybeExtractUsageAnthropic extracts usage from Anthropic SSE chunks.
-// Anthropic reports usage as { "usage": { "input_tokens": N, "output_tokens": M } }
-// in message_start and message_delta events.
+// maybeExtractUsageAnthropic extracts usage from SSE chunks. It handles both
+// Anthropic-style usage (input_tokens / output_tokens) and OpenAI-style usage
+// (prompt_tokens / completion_tokens), and looks for the usage object both at
+// the top level and nested under "message" — because a real Anthropic
+// message_start event carries usage inside {"message":{"usage":{...}}} while
+// message_delta and OpenAI-style chunks put it at the top level. This dual
+// location/dual field-name handling is needed because a transparent proxy may
+// forward to gateways that emit OpenAI-style SSE (e.g. DeepSeek via aipds) or
+// to a real Anthropic-compatible upstream; without it the recorded token
+// counts silently stay at zero.
 func maybeExtractUsageAnthropic(chunk []byte, input, output int) (int, int) {
 	if bytes.Index(chunk, []byte("\"usage\"")) < 0 {
 		return input, output
@@ -919,20 +930,46 @@ func maybeExtractUsageAnthropic(chunk []byte, input, output int) (int, int) {
 	if bytes.Equal(payload, []byte("[DONE]")) {
 		return input, output
 	}
+	// usageFields holds the four possible field names. The same object shape is
+	// reused whether the usage sits at the top level or under "message".
+	type usageFields struct {
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	}
 	var parsed struct {
-		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
+		Usage   usageFields `json:"usage"`
+		Message struct {
+			Usage usageFields `json:"usage"`
+		} `json:"message"`
 	}
 	if json.Unmarshal(payload, &parsed) != nil {
 		return input, output
 	}
-	if parsed.Usage.InputTokens > 0 {
-		input = parsed.Usage.InputTokens
+	// A chunk may carry usage at either location. Prefer the first non-empty one.
+	pick := func(u usageFields) (int, int) {
+		in := u.InputTokens
+		if in == 0 {
+			in = u.PromptTokens
+		}
+		out := u.OutputTokens
+		if out == 0 {
+			out = u.CompletionTokens
+		}
+		return in, out
 	}
-	if parsed.Usage.OutputTokens > 0 {
-		output += parsed.Usage.OutputTokens
+	for _, u := range []usageFields{parsed.Usage, parsed.Message.Usage} {
+		in, out := pick(u)
+		if in == 0 && out == 0 {
+			continue
+		}
+		if in > 0 {
+			input = in
+		}
+		if out > 0 {
+			output += out
+		}
 	}
 	return input, output
 }

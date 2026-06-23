@@ -84,6 +84,13 @@ const dashboardHTML = `<!doctype html>
     th { color: var(--muted); font-weight: 600; }
     .error { color: var(--danger); margin-top: 12px; display: none; }
     .muted { color: var(--muted); }
+    .chart-legend { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; flex-wrap: nowrap; overflow: hidden; }
+    .legend-arrow { cursor: pointer; user-select: none; font-size: 16px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; width: 24px; text-align: center; line-height: 24px; }
+    .legend-arrow:hover { color: var(--primary); border-color: var(--primary); }
+    .legend-items { display: flex; gap: 4px; overflow: hidden; flex: 1; }
+    .legend-item { cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); white-space: nowrap; transition: opacity 0.15s; }
+    .legend-item:hover { border-color: var(--primary); }
+    .legend-item.hidden { opacity: 0.35; }
     canvas { max-height: 280px; }
     @media (max-width: 1100px) {
       .filters { grid-template-columns: repeat(2, 1fr); }
@@ -207,6 +214,7 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="card full">
         <h2>模型 Token 总量</h2>
+        <div id="tokensChartLegend" class="chart-legend"></div>
         <div class="table-wrap">
           <table class="tokens-table">
             <thead>
@@ -221,18 +229,22 @@ const dashboardHTML = `<!doctype html>
       </div>
       <div class="card">
         <h2>延迟趋势</h2>
+        <div id="latencyChartLegend" class="chart-legend"></div>
         <canvas id="latencyChart"></canvas>
       </div>
       <div class="card">
         <h2>生成速度趋势（TG）</h2>
+        <div id="tpsChartLegend" class="chart-legend"></div>
         <canvas id="tpsChart"></canvas>
       </div>
       <div class="card">
         <h2>不同上下文长度 PP 速度</h2>
+        <div id="ppChartLegend" class="chart-legend"></div>
         <canvas id="ppChart"></canvas>
       </div>
       <div class="card">
         <h2>不同上下文长度 TG 速度</h2>
+        <div id="tgChartLegend" class="chart-legend"></div>
         <canvas id="tgChart"></canvas>
       </div>
     </section>
@@ -385,6 +397,96 @@ function renderSummary(rows) {
 function upsertChart(id, config) {
   if (charts[id]) charts[id].destroy();
   charts[id] = new Chart(eid(id), config);
+  var st = legendState[id];
+  if (st && st.hidden) {
+    for (var i = 0; i < charts[id].data.datasets.length; i++) {
+      charts[id].getDatasetMeta(i).hidden = !!st.hidden[i];
+    }
+    charts[id].update();
+  }
+  paginateLegend(id);
+}
+
+// Chart.js options shared by every provider/model multi-series chart. The
+// built-in legend is disabled in favor of a custom paginated legend (see
+// paginateLegend) that supports < > arrows so many series stay readable.
+function multiSeriesOpts() {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false } }
+  };
+}
+
+var CHART_COLORS = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
+
+// legendState tracks, per chart, the set of hidden series (by dataset index)
+// and the current legend pagination window. Persisted across re-renders so
+// hiding/paging survives a refresh.
+var legendState = {};
+var LEGEND_PAGE_SIZE = 3;
+
+// paginateLegend renders a < > paginated legend for the given chartId. Each
+// chip toggles the visibility of its dataset. Hidden chips are dimmed. The
+// visible window advances by LEGEND_PAGE_SIZE; chips outside the window are
+// not rendered.
+function paginateLegend(chartId) {
+  var chart = charts[chartId];
+  var host = eid(chartId + "Legend");
+  if (!chart || !host) return;
+  var st = legendState[chartId] || { hidden: {}, start: 0 };
+  legendState[chartId] = st;
+
+  var datasets = chart.data.datasets;
+  var total = datasets.length;
+  var maxStart = Math.max(0, total - LEGEND_PAGE_SIZE);
+  if (st.start > maxStart) st.start = maxStart;
+  if (st.start < 0) st.start = 0;
+  var end = Math.min(total, st.start + LEGEND_PAGE_SIZE);
+
+  host.innerHTML = "";
+  if (total === 0) return;
+
+  if (st.start > 0) {
+    var prev = document.createElement("span");
+    prev.className = "legend-arrow";
+    prev.textContent = "‹";
+    prev.title = "上一组";
+    prev.addEventListener("click", function() { st.start = Math.max(0, st.start - LEGEND_PAGE_SIZE); paginateLegend(chartId); });
+    host.appendChild(prev);
+  }
+
+  var wrap = document.createElement("div");
+  wrap.className = "legend-items";
+  for (var i = st.start; i < end; i++) {
+    (function(idx) {
+      var meta = chart.getDatasetMeta(idx);
+      var hidden = !!st.hidden[idx] || meta.hidden;
+      var color = datasets[idx].borderColor || datasets[idx].backgroundColor;
+      var chip = document.createElement("span");
+      chip.className = "legend-item" + (hidden ? " hidden" : "");
+      chip.style.borderLeft = "4px solid " + color;
+      chip.textContent = datasets[idx].label;
+      chip.title = hidden ? "点击显示" : "点击隐藏";
+      chip.addEventListener("click", function() {
+        st.hidden[idx] = !hidden;
+        meta.hidden = !hidden;
+        chart.update();
+        paginateLegend(chartId);
+      });
+      wrap.appendChild(chip);
+    })(i);
+  }
+  host.appendChild(wrap);
+
+  if (end < total) {
+    var next = document.createElement("span");
+    next.className = "legend-arrow";
+    next.textContent = "›";
+    next.title = "下一组";
+    next.addEventListener("click", function() { st.start = Math.min(maxStart, st.start + LEGEND_PAGE_SIZE); paginateLegend(chartId); });
+    host.appendChild(next);
+  }
 }
 
 function toLocalISO(ts) {
@@ -421,9 +523,9 @@ function renderTimeseries(rows) {
   var idx = 0;
   grouped.forEach(function(byTs, name) {
     latDatasets.push({
-      label: name + " 延迟",
+      label: name,
       data: allTs.map(function(ts) { var x = byTs.get(ts); return x ? x.avg_latency_ms : null; }),
-      borderColor: colors[idx % colors.length],
+      borderColor: CHART_COLORS[idx % CHART_COLORS.length],
       tension: 0.25
     });
     idx++;
@@ -431,7 +533,7 @@ function renderTimeseries(rows) {
   upsertChart("latencyChart", {
     type: "line",
     data: { labels: labels, datasets: latDatasets },
-    options: { responsive: true, maintainAspectRatio: false }
+    options: multiSeriesOpts()
   });
 
   // TG token/s trend: multi-line per provider/model, using server-side tokens_per_sec.
@@ -439,9 +541,9 @@ function renderTimeseries(rows) {
   idx = 0;
   grouped.forEach(function(byTs, name) {
     tpsDatasets.push({
-      label: name + " TG",
+      label: name,
       data: allTs.map(function(ts) { var x = byTs.get(ts); return x ? x.tokens_per_sec : null; }),
-      borderColor: colors[idx % colors.length],
+      borderColor: CHART_COLORS[idx % CHART_COLORS.length],
       tension: 0.25
     });
     idx++;
@@ -449,7 +551,7 @@ function renderTimeseries(rows) {
   upsertChart("tpsChart", {
     type: "line",
     data: { labels: labels, datasets: tpsDatasets },
-    options: { responsive: true, maintainAspectRatio: false }
+    options: multiSeriesOpts()
   });
 }
 
@@ -467,7 +569,7 @@ function renderBuckets(rows) {
     if (!bucketMap.has(r.bucket)) bucketMap.set(r.bucket, Number(r.bucket_min) || 0);
   }
   var labels = Array.from(bucketMap.entries()).sort(function(a, b) { return a[1] - b[1]; }).map(function(x) { return x[0]; });
-  var colors = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
+  var colors = CHART_COLORS;
   var ppDatasets = [];
   var tgDatasets = [];
   var idx = 0;
@@ -478,8 +580,8 @@ function renderBuckets(rows) {
     tgDatasets.push({ label: name, data: labels.map(function(b) { var x = byBucket.get(b); return x ? x.tg_rate : 0; }), borderColor: color, backgroundColor: color, tension: 0.2 });
     idx++;
   });
-  upsertChart("ppChart", { type: "line", data: { labels: labels, datasets: ppDatasets }, options: { responsive: true, maintainAspectRatio: false } });
-  upsertChart("tgChart", { type: "line", data: { labels: labels, datasets: tgDatasets }, options: { responsive: true, maintainAspectRatio: false } });
+  upsertChart("ppChart", { type: "line", data: { labels: labels, datasets: ppDatasets }, options: multiSeriesOpts() });
+  upsertChart("tgChart", { type: "line", data: { labels: labels, datasets: tgDatasets }, options: multiSeriesOpts() });
 }
 
 function fmtTokens(n) {
@@ -518,19 +620,43 @@ function renderTokens(rows) {
     body.appendChild(tr);
   }
 
-  var labels = items.map(function(m) { return m.model; });
-  var promptData = items.map(function(m) { return m.prompt; });
-  var completionData = items.map(function(m) { return m.completion; });
+  // Token chart: each model gets a single grouped dataset carrying both its
+  // prompt and completion bars, so the per-model legend toggles a whole model.
+  // We render two categories per model (prompt/completion) on the X axis to
+  // keep prompt vs completion side by side.
+  var modelNames = items.map(function(m) { return m.model; });
+  var catLabels = [];
+  items.forEach(function(m) {
+    catLabels.push(m.model + " 输入");
+    catLabels.push(m.model + " 输出");
+  });
+  var tokenDatasets = [];
+  for (var i = 0; i < items.length; i++) {
+    (function(i) {
+      var m = items[i];
+      var color = CHART_COLORS[i % CHART_COLORS.length];
+      var promptIdx = i * 2;
+      var completionIdx = i * 2 + 1;
+      var data = new Array(catLabels.length).fill(0);
+      data[promptIdx] = m.prompt;
+      data[completionIdx] = m.completion;
+      tokenDatasets.push({
+        label: m.model,
+        data: data,
+        backgroundColor: color,
+        hidden: false
+      });
+    })(i);
+  }
   upsertChart("tokensChart", {
     type: "bar",
-    data: {
-      labels: labels,
-      datasets: [
-        { label: "输入 Prompt", data: promptData, backgroundColor: "#315efb" },
-        { label: "输出 Completion", data: completionData, backgroundColor: "#12a87c" }
-      ]
-    },
-    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: false }, y: { stacked: false, beginAtZero: true } } }
+    data: { labels: catLabels, datasets: tokenDatasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { stacked: false }, y: { stacked: false, beginAtZero: true } }
+    }
   });
 }
 

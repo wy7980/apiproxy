@@ -600,3 +600,77 @@ func TestMessagesBodyTooLarge(t *testing.T) {
 		t.Fatalf("oversized messages status = %d, want 413; body = %s", w.Code, w.Body.String()[:min(200, w.Body.Len())])
 	}
 }
+
+// ---------- Usage extraction from SSE chunks ----------
+
+func TestMaybeExtractUsageAnthropicFormat(t *testing.T) {
+	// Anthropic-style usage: input_tokens / output_tokens in message_start and message_delta.
+	input, output := 0, 0
+
+	// message_start chunk with input_tokens=10, output_tokens=0
+	chunk := []byte("event: message_start\ndata: " +
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}` +
+		"\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 10 || output != 0 {
+		t.Fatalf("after message_start: input=%d output=%d, want 10/0", input, output)
+	}
+
+	// message_delta chunk with output_tokens=5
+	chunk = []byte("event: message_delta\ndata: " +
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}` +
+		"\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 10 || output != 5 {
+		t.Fatalf("after message_delta: input=%d output=%d, want 10/5", input, output)
+	}
+}
+
+func TestMaybeExtractUsageAnthropicOpenAIFallback(t *testing.T) {
+	// When upstream returns OpenAI-style usage (prompt_tokens/completion_tokens)
+	// instead of Anthropic-style (input_tokens/output_tokens), the function should
+	// still extract the values. This is the bug that caused DeepSeek/Qwen token
+	// counts to always be zero.
+	input, output := 0, 0
+
+	// SSE chunk with OpenAI-style usage (e.g. from a gateway that converts
+	// Anthropic requests into OpenAI-format responses like DeepSeek via aipds).
+	chunk := []byte("data: " +
+		`{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"usage":{"prompt_tokens":378,"completion_tokens":72}}` +
+		"\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 378 || output != 72 {
+		t.Fatalf("OpenAI fallback: input=%d output=%d, want 378/72", input, output)
+	}
+}
+
+func TestMaybeExtractUsageAnthropicMixedFormat(t *testing.T) {
+	// Anthropic input_tokens followed by OpenAI completion_tokens in a later chunk.
+	input, output := 0, 0
+
+	chunk := []byte("data: " +
+		`{"type":"message_start","message":{"usage":{"input_tokens":100}}}` +
+		"\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 100 {
+		t.Fatalf("input=%d, want 100", input)
+	}
+
+	// OpenAI-style completion_tokens in a later chunk.
+	chunk = []byte("data: " +
+		`{"choices":[],"usage":{"completion_tokens":30}}` +
+		"\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 100 || output != 30 {
+		t.Fatalf("mixed format: input=%d output=%d, want 100/30", input, output)
+	}
+}
+
+func TestMaybeExtractUsageAnthropicNoUsage(t *testing.T) {
+	input, output := 5, 3
+	chunk := []byte("data: " + `{"type":"content_block_delta","delta":{"text":"hi"}}` + "\n\n")
+	input, output = maybeExtractUsageAnthropic(chunk, input, output)
+	if input != 5 || output != 3 {
+		t.Fatalf("no usage: input=%d output=%d, want unchanged 5/3", input, output)
+	}
+}

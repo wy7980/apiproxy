@@ -101,6 +101,68 @@ curl http://localhost:8080/v1/messages \
 curl http://localhost:8080/metrics
 ```
 
+## 打包分发
+
+提供一个打包脚本：
+
+```bash
+./scripts/package.sh
+```
+
+默认行为：
+
+- 使用当前平台构建（默认取 `go env GOOS/GOARCH`）
+- 版本号优先取当前 git tag（如 `v1.2.3` → `1.2.3`），否则取短 commit hash
+- 输出到 `dist/`
+- 打包内容包括：
+  - `apiproxy` 二进制
+  - `configs/apiproxy.yaml` 示例配置
+  - `README.md`
+
+生成产物示例：
+
+```text
+dist/
+  apiproxy-1.2.3-linux-amd64.tar.gz
+```
+
+常见用法：
+
+```bash
+# 当前平台
+./scripts/package.sh
+
+# 指定版本号
+./scripts/package.sh -v 1.0.0
+
+# 指定输出目录
+./scripts/package.sh -o /tmp/dist
+
+# 跨平台打包
+./scripts/package.sh --os linux --arch arm64
+
+# 一次打包 4 个常用平台
+./scripts/package.sh --all-platforms
+
+# 跳过测试
+./scripts/package.sh --skip-test
+```
+
+`--all-platforms` 会生成：
+
+- `linux/amd64`
+- `linux/arm64`
+- `darwin/amd64`
+- `darwin/arm64`
+
+打包前默认执行：
+
+```bash
+go test ./...
+```
+
+如果只是临时本地验证，可加 `--skip-test`。
+
 ## 安全
 
 ### 凭据

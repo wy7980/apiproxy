@@ -496,7 +496,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			next := html.EscapeString(r.FormValue("next"))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
-			page := strings.Replace(loginHTMLWithErr, "%s", "账号或密码错误", 1)
+			page := strings.Replace(loginHTMLWithErr, "%s", "Invalid username or password", 1)
 			page = strings.Replace(page, "%s", next, 1)
 			_, _ = w.Write([]byte(page))
 			return

@@ -24,6 +24,7 @@ type StatsOptions struct {
 	Route    string
 	Interval string // "minute", "hour", "day", or "" for auto
 	AsJSON   bool
+	Lang     string // "en" (default) or "zh"
 }
 
 // DefaultWindow is the default lookback window for the stats subcommand.
@@ -38,6 +39,21 @@ func RegisterStatsFlags(fs *flag.FlagSet, opts *StatsOptions) {
 	fs.StringVar(&opts.Route, "route", "", "filter by route")
 	fs.StringVar(&opts.Interval, "interval", "", "timeseries bucket: minute, hour, day (default auto from window)")
 	fs.BoolVar(&opts.AsJSON, "json", false, "emit raw JSON instead of tables")
+	fs.StringVar(&opts.Lang, "lang", "", "output language: 'en' (default) or 'zh'")
+}
+
+// translateErrMsg converts inline error messages to the target language.
+func translateErrMsg(lang, msg string) string {
+	if lang != "zh" {
+		return msg
+	}
+	switch {
+	case strings.HasPrefix(msg, "invalid -window"):
+		return "无效的 -window: 必须为正数"
+	case strings.HasPrefix(msg, "missing -db"):
+		return "缺少 -db 或带 storage.path 的 -config"
+	}
+	return msg
 }
 
 // PrintStats opens the SQLite store at opts.DBPath and prints aggregate
@@ -46,6 +62,11 @@ func RegisterStatsFlags(fs *flag.FlagSet, opts *StatsOptions) {
 // On success it returns nil; the caller is responsible for nothing — the
 // store is opened and closed inside this function.
 func PrintStats(ctx context.Context, out io.Writer, opts StatsOptions) error {
+	lang := opts.Lang
+	if lang == "" {
+		lang = "en"
+	}
+
 	if opts.Window <= 0 {
 		return fmt.Errorf("invalid -window: must be positive")
 	}
@@ -95,27 +116,40 @@ func PrintStats(ctx context.Context, out io.Writer, opts StatsOptions) error {
 		return writeJSON(out, summaries, pcts, buckets, ts, opts.Window, interval)
 	}
 
-	writeSummary(out, summaries, pcts, opts.Window)
-	writeBuckets(out, buckets)
-	writeTimeseries(out, ts)
+	writeSummary(out, summaries, pcts, opts.Window, lang)
+	writeBuckets(out, buckets, lang)
+	writeTimeseries(out, ts, lang)
 	return nil
 }
 
-func writeSummary(out io.Writer, summaries []storage.ModelSummary, pcts []storage.PercentileRow, window time.Duration) {
+func writeSummary(out io.Writer, summaries []storage.ModelSummary, pcts []storage.PercentileRow, window time.Duration, lang string) {
 	pctMap := make(map[string]storage.PercentileRow, len(pcts))
 	for _, p := range pcts {
 		pctMap[p.Provider+"\x00"+p.Model] = p
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "最近 %s 的统计\n", humanWindow(window))
+	if lang == "zh" {
+		fmt.Fprintf(out, "最近 %s 的统计\n", humanWindow(window, lang))
+	} else {
+		fmt.Fprintf(out, "Stats for last %s\n", humanWindow(window, lang))
+	}
 	fmt.Fprintln(out)
 	if len(summaries) == 0 {
-		fmt.Fprintln(out, "  (没有数据)")
+		if lang == "zh" {
+			fmt.Fprintln(out, "  (没有数据)")
+		} else {
+			fmt.Fprintln(out, "  (no data)")
+		}
 		return
 	}
 
-	header := []string{"Provider", "Model", "Route", "请求", "错误", "成功率", "平均", "P50", "P95", "P99", "TPS", "Prompt", "Compl", "Stream"}
+	var header []string
+	if lang == "zh" {
+		header = []string{"Provider", "Model", "Route", "请求", "错误", "成功率", "平均延迟", "P50", "P95", "P99", "TG tok/s", "Prompt", "Completion", "Stream"}
+	} else {
+		header = []string{"Provider", "Model", "Route", "Requests", "Errors", "Success %", "Avg", "P50", "P95", "P99", "TG tok/s", "Prompt", "Completion", "Stream"}
+	}
 	rows := make([][]string, 0, len(summaries))
 	for _, m := range summaries {
 		row := []string{
@@ -145,16 +179,29 @@ func writeSummary(out io.Writer, summaries []storage.ModelSummary, pcts []storag
 	writeTable(out, header, rows)
 }
 
-func writeBuckets(out io.Writer, rows []storage.BucketRow) {
+func writeBuckets(out io.Writer, rows []storage.BucketRow, lang string) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "按上下文长度分桶 (PP/TG 速度)")
+	if lang == "zh" {
+		fmt.Fprintln(out, "按上下文长度分桶 (PP/TG 速度)")
+	} else {
+		fmt.Fprintln(out, "By context length bucket (PP/TG speed)")
+	}
 	fmt.Fprintln(out)
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "  (没有数据)")
+		if lang == "zh" {
+			fmt.Fprintln(out, "  (没有数据)")
+		} else {
+			fmt.Fprintln(out, "  (no data)")
+		}
 		return
 	}
 
-	header := []string{"Provider", "Model", "桶", "请求", "Prompt", "Completion", "平均延迟", "PP tok/s", "TG tok/s"}
+	var header []string
+	if lang == "zh" {
+		header = []string{"Provider", "Model", "桶", "请求", "Prompt", "Completion", "平均延迟", "PP tok/s", "TG tok/s"}
+	} else {
+		header = []string{"Provider", "Model", "Bucket", "Requests", "Prompt", "Completion", "Avg Latency", "PP tok/s", "TG tok/s"}
+	}
 	data := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		data = append(data, []string{
@@ -211,7 +258,8 @@ func writeTable(out io.Writer, header []string, rows [][]string) {
 	for i, h := range header {
 		switch h {
 		case "请求", "错误", "成功率", "平均", "平均延迟", "P50", "P95", "P99", "TPS",
-			"Prompt", "Completion", "Compl", "Stream", "桶", "PP tok/s", "TG tok/s":
+			"Requests", "Errors", "Success %", "Avg", "Avg Latency", "TG tok/s",
+			"Prompt", "Completion", "Compl", "Stream", "桶", "Bucket", "PP tok/s":
 			right[i] = true
 		}
 	}
@@ -305,26 +353,45 @@ func runeWidth(r rune) int {
 	}
 }
 
-func humanWindow(d time.Duration) string {
+func humanWindow(d time.Duration, lang string) string {
 	if d >= time.Hour && d%time.Hour == 0 {
-		return fmt.Sprintf("%d 小时", int(d/time.Hour))
+		if lang == "zh" {
+			return fmt.Sprintf("%d 小时", int(d/time.Hour))
+		}
+		return fmt.Sprintf("%d hours", int(d/time.Hour))
 	}
 	if d >= time.Minute && d%time.Minute == 0 {
-		return fmt.Sprintf("%d 分钟", int(d/time.Minute))
+		if lang == "zh" {
+			return fmt.Sprintf("%d 分钟", int(d/time.Minute))
+		}
+		return fmt.Sprintf("%d minutes", int(d/time.Minute))
 	}
 	return d.String()
 }
 
-func writeTimeseries(out io.Writer, rows []storage.TimeSeriesPoint) {
+func writeTimeseries(out io.Writer, rows []storage.TimeSeriesPoint, lang string) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "时间序列趋势")
+	if lang == "zh" {
+		fmt.Fprintln(out, "时间序列趋势")
+	} else {
+		fmt.Fprintln(out, "Time series trend")
+	}
 	fmt.Fprintln(out)
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "  (没有数据)")
+		if lang == "zh" {
+			fmt.Fprintln(out, "  (没有数据)")
+		} else {
+			fmt.Fprintln(out, "  (no data)")
+		}
 		return
 	}
 
-	header := []string{"时间", "Provider", "Model", "请求", "错误", "平均延迟", "Prompt", "Completion", "TG tok/s"}
+	var header []string
+	if lang == "zh" {
+		header = []string{"时间", "Provider", "Model", "请求", "错误", "平均延迟", "Prompt", "Completion", "TG tok/s"}
+	} else {
+		header = []string{"Time", "Provider", "Model", "Requests", "Errors", "Avg Latency", "Prompt", "Completion", "TG tok/s"}
+	}
 	data := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		data = append(data, []string{

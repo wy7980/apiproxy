@@ -63,7 +63,7 @@ routes:
     fallback:
       enabled: true
       max_attempts: 3
-      on_status: [408, 409, 425, 429, 500, 502, 503, 504]
+      on_status: [400, 404, 408, 409, 413, 425, 429, 500, 502, 503, 504]
       on_timeout: true
       on_connect_error: true
       allow_downgrade: false
@@ -86,7 +86,7 @@ routes:
     fallback:
       enabled: true
       max_attempts: 2
-      on_status: [429, 500, 502, 503, 504]
+      on_status: [400, 404, 408, 413, 429, 500, 502, 503, 504]
       on_timeout: true
       on_connect_error: true
       allow_downgrade: true
@@ -108,7 +108,7 @@ routes:
     fallback:
       enabled: true
       max_attempts: 2
-      on_status: [429, 500, 502, 503, 504, 529]
+      on_status: [400, 404, 408, 413, 429, 500, 502, 503, 504, 529]
       on_timeout: true
       on_connect_error: true
     providers:

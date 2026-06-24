@@ -1,7 +1,7 @@
 package admin
 
 const dashboardHTML = `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -146,66 +146,84 @@ const dashboardHTML = `<!doctype html>
     .toast.show { opacity: 1; }
     .toast.ok { background: #12a87c; }
     .toast.err { background: var(--danger); }
+    .lang-btn {
+      padding: 4px 10px;
+      min-width: auto;
+      width: auto;
+      font-size: 11px;
+      background: #fff;
+      border-color: var(--border);
+      color: var(--text);
+      margin-right: 8px;
+    }
+    .lang-btn:hover { border-color: var(--primary); color: var(--primary); }
   </style>
 </head>
 <body>
   <header>
     <div class="header-row">
       <div>
-        <h1>apiproxy 性能分析</h1>
-        <div class="subtitle">查看模型请求量、成功率、延迟、每秒 token、上下文长度下 PP/TG 速度。</div>
+        <h1 id="page-title">apiproxy Performance Analytics</h1>
+        <div class="subtitle" id="page-subtitle">View model request volume, success rate, latency, tokens per second, and PP/TG speed across context lengths.</div>
       </div>
       <div class="header-actions">
-        <button id="configBtn">配置</button>
-        <button id="backBtn" class="view-hidden" style="background:#fff;color:var(--primary);">返回仪表盘</button>
-        <a href="/logout" id="logoutBtn">退出</a>
+        <button id="langBtn" class="lang-btn">中文</button>
+        <button id="configBtn">Config</button>
+        <button id="backBtn" class="view-hidden" style="background:#fff;color:var(--primary);">Back to Dashboard</button>
+        <a href="/logout" id="logoutBtn">Logout</a>
       </div>
     </div>
   </header>
   <main id="dashboardView">
     <section class="filters">
       <div>
-        <label>时间范围</label>
+        <label id="label-range">Time Range</label>
         <select id="range">
-          <option value="-1h">最近 1 小时</option>
-          <option value="-6h">最近 6 小时</option>
-          <option value="-24h" selected>最近 24 小时</option>
-          <option value="-7d">最近 7 天</option>
-          <option value="-30d">最近 30 天</option>
+          <option value="-1h" data-i18n="range_1h">Last 1 hour</option>
+          <option value="-6h" data-i18n="range_6h">Last 6 hours</option>
+          <option value="-24h" selected data-i18n="range_24h">Last 24 hours</option>
+          <option value="-7d" data-i18n="range_7d">Last 7 days</option>
+          <option value="-30d" data-i18n="range_30d">Last 30 days</option>
         </select>
       </div>
       <div>
         <label>Provider</label>
-        <select id="provider"><option value="">全部</option></select>
+        <select id="provider"><option value="" data-i18n="filter_all">All</option></select>
       </div>
       <div>
         <label>Model</label>
-        <select id="model"><option value="">全部</option></select>
+        <select id="model"><option value="" data-i18n="filter_all">All</option></select>
       </div>
       <div>
         <label>Route</label>
-        <select id="route"><option value="">全部</option></select>
+        <select id="route"><option value="" data-i18n="filter_all">All</option></select>
       </div>
       <div>
-        <label>粒度</label>
+        <label id="label-interval">Granularity</label>
         <select id="interval">
-          <option value="minute">分钟</option>
-          <option value="hour" selected>小时</option>
-          <option value="day">天</option>
+          <option value="minute" data-i18n="gran_minute">Minute</option>
+          <option value="hour" selected data-i18n="gran_hour">Hour</option>
+          <option value="day" data-i18n="gran_day">Day</option>
         </select>
       </div>
-      <button id="refresh">刷新</button>
+      <button id="refresh" data-i18n="btn_refresh">Refresh</button>
     </section>
     <div class="error" id="error"></div>
 
     <section class="grid">
       <div class="card full">
-        <h2>模型性能汇总</h2>
+        <h2 data-i18n="title_summary">Model Performance Summary</h2>
         <div class="table-wrap">
           <table class="summary-table">
             <thead>
               <tr>
-                <th>Provider</th><th>Model</th><th>Route</th><th>请求</th><th>错误</th><th>成功率</th><th>平均延迟</th><th>P50</th><th>P95</th><th>P99</th><th>TG tok/s</th><th>Prompt</th><th>Completion</th><th>Fallback</th>
+                <th>Provider</th><th>Model</th><th>Route</th>
+                <th data-i18n="col_requests">Requests</th>
+                <th data-i18n="col_errors">Errors</th>
+                <th data-i18n="col_successrate">Success Rate</th>
+                <th data-i18n="col_avglatency">Avg Latency</th>
+                <th>P50</th><th>P95</th><th>P99</th>
+                <th>TG tok/s</th><th>Prompt</th><th>Completion</th><th>Fallback</th>
               </tr>
             </thead>
             <tbody id="summaryBody"></tbody>
@@ -213,12 +231,17 @@ const dashboardHTML = `<!doctype html>
         </div>
       </div>
       <div class="card full">
-        <h2>模型 Token 总量</h2>
+        <h2 data-i18n="title_tokens">Model Token Totals</h2>
         <div class="table-wrap">
           <table class="tokens-table">
             <thead>
               <tr>
-                <th>Model</th><th>输入 Prompt</th><th>输出 Completion</th><th>合计</th><th>输入占比</th><th>输出占比</th>
+                <th>Model</th>
+                <th data-i18n="col_prompt">Input Prompt</th>
+                <th data-i18n="col_completion">Output Completion</th>
+                <th data-i18n="col_total">Total</th>
+                <th data-i18n="col_inratio">Input %</th>
+                <th data-i18n="col_outratio">Output %</th>
               </tr>
             </thead>
             <tbody id="tokensBody"></tbody>
@@ -228,22 +251,22 @@ const dashboardHTML = `<!doctype html>
         <canvas id="tokensChart"></canvas>
       </div>
       <div class="card">
-        <h2>延迟趋势</h2>
+        <h2 data-i18n="title_latency">Latency Trend</h2>
         <div id="latencyChartLegend" class="chart-legend"></div>
         <canvas id="latencyChart"></canvas>
       </div>
       <div class="card">
-        <h2>生成速度趋势（TG）</h2>
+        <h2 data-i18n="title_tg_speed">Generation Speed Trend (TG)</h2>
         <div id="tpsChartLegend" class="chart-legend"></div>
         <canvas id="tpsChart"></canvas>
       </div>
       <div class="card">
-        <h2>不同上下文长度 PP 速度</h2>
+        <h2 data-i18n="title_pp_by_ctx">PP Speed by Context Length</h2>
         <div id="ppChartLegend" class="chart-legend"></div>
         <canvas id="ppChart"></canvas>
       </div>
       <div class="card">
-        <h2>不同上下文长度 TG 速度</h2>
+        <h2 data-i18n="title_tg_by_ctx">TG Speed by Context Length</h2>
         <div id="tgChartLegend" class="chart-legend"></div>
         <canvas id="tgChart"></canvas>
       </div>
@@ -253,9 +276,9 @@ const dashboardHTML = `<!doctype html>
   <section id="configView" class="view-hidden" style="padding:16px 28px 32px;">
     <div class="config-section">
       <div class="config-head">
-        <h2>配置管理</h2>
+        <h2 data-i18n="title_config">Config Management</h2>
         <div class="row-controls">
-          <button id="saveConfigBtn" class="icon-btn">保存</button>
+          <button id="saveConfigBtn" class="icon-btn" data-i18n="btn_save">Save</button>
         </div>
       </div>
       <div class="config-body">
@@ -265,7 +288,7 @@ const dashboardHTML = `<!doctype html>
         </div>
         <div id="panel-providers" class="panel active">
           <div class="row-controls">
-            <button id="addProviderBtn" class="icon-btn">+ 新增 Provider</button>
+            <button id="addProviderBtn" class="icon-btn" data-i18n="btn_add_provider">+ Add Provider</button>
           </div>
           <div class="table-wrap">
             <table class="config-table">
@@ -280,7 +303,7 @@ const dashboardHTML = `<!doctype html>
         </div>
         <div id="panel-routes" class="panel">
           <div class="row-controls">
-            <button id="addRouteBtn" class="icon-btn">+ 新增 Route</button>
+            <button id="addRouteBtn" class="icon-btn" data-i18n="btn_add_route">+ Add Route</button>
           </div>
           <div class="table-wrap">
             <table class="config-table">
@@ -300,6 +323,160 @@ const dashboardHTML = `<!doctype html>
   <div id="toast" class="toast"></div>
 
 <script>
+// ===== i18n System =====
+const i18n = {
+  en: {
+    page_title: "apiproxy Performance Analytics",
+    page_subtitle: "View model request volume, success rate, latency, tokens per second, and PP/TG speed across context lengths.",
+    btn_config: "Config",
+    btn_back: "Back to Dashboard",
+    btn_logout: "Logout",
+    btn_refresh: "Refresh",
+    btn_save: "Save",
+    btn_save_saving: "Saving...",
+    btn_add_provider: "+ Add Provider",
+    btn_add_route: "+ Add Route",
+    btn_delete: "Delete",
+    label_range: "Time Range",
+    range_1h: "Last 1 hour",
+    range_6h: "Last 6 hours",
+    range_24h: "Last 24 hours",
+    range_7d: "Last 7 days",
+    range_30d: "Last 30 days",
+    label_interval: "Granularity",
+    gran_minute: "Minute",
+    gran_hour: "Hour",
+    gran_day: "Day",
+    filter_all: "All",
+    no_data: "No data matches current filter",
+    no_providers: "No providers yet — click Add to create one",
+    no_routes: "No routes yet — click Add to create one",
+    title_summary: "Model Performance Summary",
+    title_tokens: "Model Token Totals",
+    title_latency: "Latency Trend",
+    title_tg_speed: "Generation Speed Trend (TG)",
+    title_pp_by_ctx: "PP Speed by Context Length",
+    title_tg_by_ctx: "TG Speed by Context Length",
+    title_config: "Config Management",
+    col_requests: "Requests",
+    col_errors: "Errors",
+    col_successrate: "Success Rate",
+    col_avglatency: "Avg Latency",
+    col_prompt: "Input Prompt",
+    col_completion: "Output Completion",
+    col_total: "Total",
+    col_inratio: "Input %",
+    col_outratio: "Output %",
+    legend_prev: "Previous",
+    legend_next: "Next",
+    legend_hide: "Click to hide",
+    legend_show: "Click to show",
+    toast_saved: "Config saved and reloaded",
+    toast_save_failed: "Save failed: ",
+    toast_load_failed: "Failed to load config: ",
+    confirm_delete_provider: "Delete provider \"",
+    confirm_delete_route: "Delete route \"",
+    confirm_end: "\"?",
+    label_chart_token_input: " input",
+    label_chart_token_output: " output",
+  },
+  zh: {
+    page_title: "apiproxy 性能分析",
+    page_subtitle: "查看模型请求量、成功率、延迟、每秒 token、上下文长度下 PP/TG 速度。",
+    btn_config: "配置",
+    btn_back: "返回仪表板",
+    btn_logout: "退出",
+    btn_refresh: "刷新",
+    btn_save: "保存",
+    btn_save_saving: "保存中...",
+    btn_add_provider: "+ 新增 Provider",
+    btn_add_route: "+ 新增 Route",
+    btn_delete: "删除",
+    label_range: "时间范围",
+    range_1h: "最近 1 小时",
+    range_6h: "最近 6 小时",
+    range_24h: "最近 24 小时",
+    range_7d: "最近 7 天",
+    range_30d: "最近 30 天",
+    label_interval: "粒度",
+    gran_minute: "分钟",
+    gran_hour: "小时",
+    gran_day: "天",
+    filter_all: "全部",
+    no_data: "当前筛选范围内没有数据",
+    no_providers: "暂无 provider，点右上角新增",
+    no_routes: "暂无 route，点右上角新增",
+    title_summary: "模型性能汇总",
+    title_tokens: "模型 Token 总量",
+    title_latency: "延迟趋势",
+    title_tg_speed: "生成速度趋势（TG）",
+    title_pp_by_ctx: "不同上下文长度 PP 速度",
+    title_tg_by_ctx: "不同上下文长度 TG 速度",
+    title_config: "配置管理",
+    col_requests: "请求",
+    col_errors: "错误",
+    col_successrate: "成功率",
+    col_avglatency: "平均延迟",
+    col_prompt: "输入 Prompt",
+    col_completion: "输出 Completion",
+    col_total: "合计",
+    col_inratio: "输入占比",
+    col_outratio: "输出占比",
+    legend_prev: "上一组",
+    legend_next: "下一组",
+    legend_hide: "点击隐藏",
+    legend_show: "点击显示",
+    toast_saved: "配置已保存并热加载",
+    toast_save_failed: "保存失败: ",
+    toast_load_failed: "加载配置失败: ",
+    confirm_delete_provider: "确认删除 provider \"",
+    confirm_delete_route: "确认删除 route \"",
+    confirm_end: "\"？",
+    label_chart_token_input: " 输入",
+    label_chart_token_output: " 输出",
+  }
+};
+
+let currentLang = localStorage.getItem("apiproxy_lang") || (navigator.language.startsWith("zh") ? "zh" : "en");
+
+function applyLang() {
+  const lang = i18n[currentLang];
+
+  function t(key) { return lang[key] || i18n.en[key] || key; }
+
+  document.documentElement.lang = currentLang === "zh" ? "zh-CN" : "en";
+
+  document.getElementById("langBtn").textContent = currentLang === "zh" ? "English" : "中文";
+  document.getElementById("page-title").textContent = t("page_title");
+  document.getElementById("page-subtitle").textContent = t("page_subtitle");
+  document.getElementById("configBtn").textContent = t("btn_config");
+  document.getElementById("backBtn").textContent = t("btn_back");
+  document.getElementById("logoutBtn").textContent = t("btn_logout");
+  document.getElementById("refresh").textContent = t("btn_refresh");
+  document.getElementById("saveConfigBtn").textContent = t("btn_save");
+  document.getElementById("addProviderBtn").textContent = t("btn_add_provider");
+  document.getElementById("addRouteBtn").textContent = t("btn_add_route");
+  document.getElementById("label-range").textContent = t("label_range");
+  document.getElementById("label-interval").textContent = t("label_interval");
+
+  document.querySelectorAll("[data-i18n]").forEach(function(el) {
+    const key = el.getAttribute("data-i18n");
+    if (key) el.textContent = t(key);
+  });
+
+  // Store current language in cookie for server side
+  document.cookie = "lang=" + currentLang + "; path=/; max-age=" + (365*24*60*60);
+}
+
+document.getElementById("langBtn").addEventListener("click", function() {
+  currentLang = currentLang === "en" ? "zh" : "en";
+  localStorage.setItem("apiproxy_lang", currentLang);
+  applyLang();
+});
+
+applyLang();
+
+// ===== Dashboard Logic =====
 var charts = {};
 function eid(id) { return document.getElementById(id); }
 
@@ -343,7 +520,8 @@ function setError(err) {
 function fillSelect(id, values) {
   var el = eid(id);
   var current = el.value;
-  el.innerHTML = '<option value="">全部</option>';
+  var t = i18n[currentLang];
+  el.innerHTML = '<option value="">' + (t.filter_all || "All") + '</option>';
   for (var i = 0; i < (values || []).length; i++) {
     var v = values[i];
     if (!v) continue;
@@ -369,7 +547,8 @@ function renderSummary(rows) {
   var body = eid("summaryBody");
   body.innerHTML = "";
   if (!rows || rows.length === 0) {
-    body.innerHTML = '<tr><td colspan="14" class="muted">当前筛选范围内没有数据</td></tr>';
+    var t = i18n[currentLang];
+    body.innerHTML = '<tr><td colspan="14" class="muted">' + (t.no_data || "No data matches current filter") + '</td></tr>';
     return;
   }
   for (var i = 0; i < rows.length; i++) {
@@ -407,9 +586,6 @@ function upsertChart(id, config) {
   paginateLegend(id);
 }
 
-// Chart.js options shared by every provider/model multi-series chart. The
-// built-in legend is disabled in favor of a custom paginated legend (see
-// paginateLegend) that supports < > arrows so many series stay readable.
 function multiSeriesOpts() {
   return {
     responsive: true,
@@ -420,22 +596,16 @@ function multiSeriesOpts() {
 
 var CHART_COLORS = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
 
-// legendState tracks, per chart, the set of hidden series (by dataset index)
-// and the current legend pagination window. Persisted across re-renders so
-// hiding/paging survives a refresh.
 var legendState = {};
 var LEGEND_PAGE_SIZE = 3;
 
-// paginateLegend renders a < > paginated legend for the given chartId. Each
-// chip toggles the visibility of its dataset. Hidden chips are dimmed. The
-// visible window advances by LEGEND_PAGE_SIZE; chips outside the window are
-// not rendered.
 function paginateLegend(chartId) {
   var chart = charts[chartId];
   var host = eid(chartId + "Legend");
   if (!chart || !host) return;
   var st = legendState[chartId] || { hidden: {}, start: 0 };
   legendState[chartId] = st;
+  var t = i18n[currentLang];
 
   var datasets = chart.data.datasets;
   var total = datasets.length;
@@ -451,7 +621,7 @@ function paginateLegend(chartId) {
     var prev = document.createElement("span");
     prev.className = "legend-arrow";
     prev.textContent = "‹";
-    prev.title = "上一组";
+    prev.title = t.legend_prev || "Previous";
     prev.addEventListener("click", function() { st.start = Math.max(0, st.start - LEGEND_PAGE_SIZE); paginateLegend(chartId); });
     host.appendChild(prev);
   }
@@ -467,7 +637,7 @@ function paginateLegend(chartId) {
       chip.className = "legend-item" + (hidden ? " hidden" : "");
       chip.style.borderLeft = "4px solid " + color;
       chip.textContent = datasets[idx].label;
-      chip.title = hidden ? "点击显示" : "点击隐藏";
+      chip.title = hidden ? (t.legend_show || "Click to show") : (t.legend_hide || "Click to hide");
       chip.addEventListener("click", function() {
         st.hidden[idx] = !hidden;
         meta.hidden = !hidden;
@@ -483,15 +653,13 @@ function paginateLegend(chartId) {
     var next = document.createElement("span");
     next.className = "legend-arrow";
     next.textContent = "›";
-    next.title = "下一组";
+    next.title = t.legend_next || "Next";
     next.addEventListener("click", function() { st.start = Math.min(maxStart, st.start + LEGEND_PAGE_SIZE); paginateLegend(chartId); });
     host.appendChild(next);
   }
 }
 
 function toLocalISO(ts) {
-  // ts comes from the API as UTC (e.g. "2026-06-19T05:55:00.000").
-  // Append "Z" so JS parses it as UTC, then format back as local time.
   var d = new Date(ts + "Z");
   if (isNaN(d.getTime())) return ts;
   var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
@@ -499,14 +667,12 @@ function toLocalISO(ts) {
 }
 
 function renderTimeseries(rows) {
-  // Collect all unique timestamps across all provider/model groups for the X axis.
   var tsSet = new Map();
   for (var i = 0; i < rows.length; i++) {
     tsSet.set(rows[i].ts, true);
   }
   var allTs = Array.from(tsSet.keys()).sort();
 
-  // Group rows by provider/model for multi-line rendering.
   var grouped = new Map();
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
@@ -516,9 +682,7 @@ function renderTimeseries(rows) {
   }
 
   var labels = allTs.map(function(ts) { return toLocalISO(ts); });
-  var colors = ["#315efb", "#12a87c", "#f59e0b", "#c026d3", "#ef4444", "#0891b2"];
 
-  // Latency trend: multi-line per provider/model.
   var latDatasets = [];
   var idx = 0;
   grouped.forEach(function(byTs, name) {
@@ -536,7 +700,6 @@ function renderTimeseries(rows) {
     options: multiSeriesOpts()
   });
 
-  // TG token/s trend: multi-line per provider/model, using server-side tokens_per_sec.
   var tpsDatasets = [];
   idx = 0;
   grouped.forEach(function(byTs, name) {
@@ -569,13 +732,13 @@ function renderBuckets(rows) {
     if (!bucketMap.has(r.bucket)) bucketMap.set(r.bucket, Number(r.bucket_min) || 0);
   }
   var labels = Array.from(bucketMap.entries()).sort(function(a, b) { return a[1] - b[1]; }).map(function(x) { return x[0]; });
-  var colors = CHART_COLORS;
+
   var ppDatasets = [];
   var tgDatasets = [];
   var idx = 0;
   grouped.forEach(function(items, name) {
     var byBucket = new Map(items.map(function(x) { return [x.bucket, x]; }));
-    var color = colors[idx % colors.length];
+    var color = CHART_COLORS[idx % CHART_COLORS.length];
     ppDatasets.push({ label: name, data: labels.map(function(b) { var x = byBucket.get(b); return x ? x.pp_rate : 0; }), borderColor: color, backgroundColor: color, tension: 0.2 });
     tgDatasets.push({ label: name, data: labels.map(function(b) { var x = byBucket.get(b); return x ? x.tg_rate : 0; }), borderColor: color, backgroundColor: color, tension: 0.2 });
     idx++;
@@ -603,11 +766,12 @@ function renderTokens(rows) {
     map.set(key, cur);
   }
   var items = Array.from(map.values());
+  var t = i18n[currentLang];
 
   var body = eid("tokensBody");
   body.innerHTML = "";
   if (items.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">当前筛选范围内没有数据</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="muted">' + (t.no_data || "No data matches current filter") + '</td></tr>';
     return;
   }
   for (var i = 0; i < items.length; i++) {
@@ -620,15 +784,13 @@ function renderTokens(rows) {
     body.appendChild(tr);
   }
 
-  // Token chart: each model gets a single grouped dataset carrying both its
-  // prompt and completion bars, so the per-model legend toggles a whole model.
-  // We render two categories per model (prompt/completion) on the X axis to
-  // keep prompt vs completion side by side.
   var modelNames = items.map(function(m) { return m.model; });
   var catLabels = [];
+  var inputLabel = t.label_chart_token_input || " input";
+  var outputLabel = t.label_chart_token_output || " output";
   items.forEach(function(m) {
-    catLabels.push(m.model + " 输入");
-    catLabels.push(m.model + " 输出");
+    catLabels.push(m.model + inputLabel);
+    catLabels.push(m.model + outputLabel);
   });
   var tokenDatasets = [];
   for (var i = 0; i < items.length; i++) {
@@ -714,15 +876,15 @@ function toast(cls, msg) {
   var t = eid("toast");
   t.className = "toast " + cls;
   t.textContent = msg;
-  // force reflow so transition retriggers each call
   void t.offsetWidth;
   t.classList.add("show");
   setTimeout(function() { t.classList.remove("show"); }, 2400);
 }
 
 function loadConfig() {
+  var t = i18n[currentLang];
   return fetch("/api/config").then(function(res) {
-    if (!res.ok) return res.text().then(function(t) { throw new Error(t); });
+    if (!res.ok) return res.text().then(function(txt) { throw new Error(txt); });
     return res.json();
   }).then(function(data) {
     cfgState.providers = Array.isArray(data.providers) ? data.providers : [];
@@ -731,24 +893,26 @@ function loadConfig() {
     renderProviders();
     renderRoutes();
   }).catch(function(err) {
-    toast("err", "加载配置失败: " + (err.message || err));
+    toast("err", (t.toast_load_failed || "Failed to load config: ") + (err.message || err));
   });
 }
 
 function renderProviders() {
+  var t = i18n[currentLang];
   var body = eid("providersBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.providers.length; i++) {
     body.appendChild(providerRow(cfgState.providers[i], i));
   }
   if (cfgState.providers.length === 0) {
-    body.appendChild(el("tr", null, [el("td", {colspan: "7", class: "muted"}, ["暂无 provider，点右上角新增"])]));
+    body.appendChild(el("tr", null, [el("td", {colspan: "7", class: "muted"}, [t.no_providers || "No providers yet — click Add to create one"])]));
   }
 }
 
 function providerRow(p, idx) {
+  var t = i18n[currentLang];
   var authSel = el("select", null, [
-    el("option", {value: "both"}, ["both (推荐)"]),
+    el("option", {value: "both"}, ["both (recommended)"]),
     el("option", {value: "authorization"}, ["authorization"]),
     el("option", {value: "x-api-key"}, ["x-api-key"])
   ]);
@@ -773,18 +937,18 @@ function providerRow(p, idx) {
   var urlInput = el("input", {type: "text", value: p.base_url || "", placeholder: "https://..."});
   urlInput.addEventListener("input", function() { cfgState.providers[idx].base_url = urlInput.value; });
 
-  var keyInput = el("input", {type: "password", value: p.api_key || "", placeholder: p.api_key ? MASKED : "(空)"});
+  var keyInput = el("input", {type: "password", value: p.api_key || "", placeholder: p.api_key ? MASKED : "(empty)"});
   keyInput.addEventListener("input", function() { cfgState.providers[idx].api_key = keyInput.value; });
 
-  var keyEnvInput = el("input", {type: "text", value: p.api_key_env || "", placeholder: "可选 ENV 变量名"});
+  var keyEnvInput = el("input", {type: "text", value: p.api_key_env || "", placeholder: "ENV var name (optional)"});
   keyEnvInput.addEventListener("input", function() { cfgState.providers[idx].api_key_env = keyEnvInput.value; });
 
   var timeoutInput = el("input", {type: "text", value: p.timeout || "60s"});
   timeoutInput.addEventListener("input", function() { cfgState.providers[idx].timeout = timeoutInput.value; });
 
-  var delBtn = el("button", {class: "icon-btn", title: "删除"}, ["删除"]);
+  var delBtn = el("button", {class: "icon-btn", title: t.btn_delete || "Delete"}, [t.btn_delete || "Delete"]);
   delBtn.addEventListener("click", function() {
-    if (!confirm("确认删除 provider \"" + (p.name || "") + "\"？")) return;
+    if (!confirm((t.confirm_delete_provider || "Delete provider \"") + (p.name || "") + (t.confirm_end || "\"?"))) return;
     cfgState.providers.splice(idx, 1);
     cfgState.providerNames = cfgState.providers.map(function(x) { return x.name; }).filter(Boolean).sort();
     renderProviders();
@@ -817,13 +981,14 @@ function addProvider() {
 }
 
 function renderRoutes() {
+  var t = i18n[currentLang];
   var body = eid("routesBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.routes.length; i++) {
     body.appendChild(routeRow(cfgState.routes[i], i));
   }
   if (cfgState.routes.length === 0) {
-    body.appendChild(el("tr", null, [el("td", {colspan: "4", class: "muted"}, ["暂无 route，点右上角新增"])]));
+    body.appendChild(el("tr", null, [el("td", {colspan: "4", class: "muted"}, [t.no_routes || "No routes yet — click Add to create one"])]));
   }
 }
 
@@ -836,6 +1001,7 @@ function strategyOptions(sel, current) {
 }
 
 function routeRow(r, idx) {
+  var t = i18n[currentLang];
   if (!r) r = {};
   if (!Array.isArray(r.providers)) r.providers = [];
   if (!r.fallback) r.fallback = {};
@@ -861,7 +1027,7 @@ function routeRow(r, idx) {
     var fbCheck = el("input", {type: "checkbox"});
     fbCheck.checked = !!fb.enabled;
     fbCheck.addEventListener("change", function() { r.fallback.enabled = fbCheck.checked; });
-    var statusInput = el("input", {type: "text", value: (fb.on_status || []).join(","), placeholder: "如 429,500,503", style: "margin-top:6px; width:220px"});
+    var statusInput = el("input", {type: "text", value: (fb.on_status || []).join(","), placeholder: "e.g. 429,500,503", style: "margin-top:6px; width:220px"});
     statusInput.addEventListener("input", function() {
       r.fallback.on_status = statusInput.value.split(",").map(function(s) { return parseInt(s.trim(), 10); }).filter(function(n) { return !isNaN(n); });
     });
@@ -873,7 +1039,7 @@ function routeRow(r, idx) {
     var connCheck = el("input", {type: "checkbox"});
     connCheck.checked = !!fb.on_connect_error;
     connCheck.addEventListener("change", function() { r.fallback.on_connect_error = connCheck.checked; });
-    fallbackCell.appendChild(el("label", {class: "route-fallback"}, [fbCheck, " 启用 fallback"]));
+    fallbackCell.appendChild(el("label", {class: "route-fallback"}, [fbCheck, " enabled"]));
     fallbackCell.appendChild(el("div", {class: "route-fallback"}, [
       "max_attempts: ", maxInput,
       el("div", {style: "margin-top:6px"}, [toCheck, " on_timeout"]),
@@ -890,9 +1056,9 @@ function routeRow(r, idx) {
     refreshProviders();
   });
 
-  var delBtn = el("button", {class: "icon-btn", title: "删除 route"}, ["删除"]);
+  var delBtn = el("button", {class: "icon-btn", title: t.btn_delete || "Delete route"}, [t.btn_delete || "Delete"]);
   delBtn.addEventListener("click", function() {
-    if (!confirm("确认删除 route \"" + (r.name || "") + "\"？")) return;
+    if (!confirm((t.confirm_delete_route || "Delete route \"") + (r.name || "") + (t.confirm_end || "\"?"))) return;
     cfgState.routes.splice(idx, 1);
     renderRoutes();
   });
@@ -929,10 +1095,9 @@ function providerTargetRow(route, j) {
   var weightInput = el("input", {type: "number", value: String(t.weight || 0), style: "width:64px"});
   weightInput.addEventListener("input", function() { t.weight = parseInt(weightInput.value || "0", 10); });
 
-  var delBtn = el("button", {class: "icon-btn", title: "删除"}, ["x"]);
+  var delBtn = el("button", {class: "icon-btn", title: "Delete"}, ["x"]);
   delBtn.addEventListener("click", function() {
     route.providers.splice(j, 1);
-    // re-render the whole route row to refresh indices
     renderRoutes();
   });
 
@@ -945,7 +1110,6 @@ function providerTargetRow(route, j) {
 }
 
 function refreshRouteProviderOptions() {
-  // cheap refresh — just re-render routes
   renderRoutes();
 }
 
@@ -965,9 +1129,10 @@ function addRoute() {
 }
 
 function saveConfig() {
+  var t = i18n[currentLang];
   var saveBtn = eid("saveConfigBtn");
   saveBtn.disabled = true;
-  saveBtn.textContent = "保存中...";
+  saveBtn.textContent = t.btn_save_saving || "Saving...";
   fetch("/api/config", {
     method: "PUT",
     headers: {"Content-Type": "application/json"},
@@ -978,14 +1143,14 @@ function saveConfig() {
       return j;
     });
   }).then(function() {
-    toast("ok", "配置已保存并热加载");
+    toast("ok", t.toast_saved || "Config saved and reloaded");
     loadConfig();
     refresh();
   }).catch(function(err) {
-    toast("err", "保存失败: " + (err.message || err));
+    toast("err", (t.toast_save_failed || "Save failed: ") + (err.message || err));
   }).finally(function() {
     saveBtn.disabled = false;
-    saveBtn.textContent = "保存";
+    saveBtn.textContent = t.btn_save || "Save";
   });
 }
 

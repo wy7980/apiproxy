@@ -479,7 +479,7 @@ func TestLoginPOSTInvalidShowsError(t *testing.T) {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "账号或密码错误") {
+	if !strings.Contains(body, "Invalid username or password") {
 		t.Fatalf("body should contain error message, got: %s", body)
 	}
 }

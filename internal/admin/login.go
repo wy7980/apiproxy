@@ -1,13 +1,15 @@
+// login.go provides the login page templates with client-side i18n support.
+// Language is auto-detected from navigator.language and can be toggled via UI.
 package admin
 
 // loginHTML is the login page template. The single %s is the (HTML-escaped)
 // "next" path to redirect to after a successful login.
 const loginHTML = `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>apiproxy 登录</title>
+  <title>apiproxy Admin</title>
   <style>
     :root {
       color-scheme: light;
@@ -75,30 +77,83 @@ const loginHTML = `<!doctype html>
       margin-bottom: 16px;
       display: block;
     }
+    .lang-switch {
+      text-align: right;
+      margin-bottom: 12px;
+    }
+    .lang-btn {
+      background: none;
+      border: none;
+      color: var(--primary);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+      width: auto;
+    }
+    .lang-btn:hover { text-decoration: underline; filter: none; }
   </style>
 </head>
 <body>
   <form class="login-card" method="POST" action="/login">
-    <h1>apiproxy 管理后台</h1>
-    <p class="subtitle">请输入账号和密码以访问仪表板。</p>
-    <label>账号</label>
+    <div class="lang-switch">
+      <button type="button" class="lang-btn" onclick="toggleLang()" id="langBtn">中文</button>
+    </div>
+    <h1 data-i18n="title">apiproxy Admin</h1>
+    <p class="subtitle" data-i18n="subtitle">Enter your credentials to access the dashboard.</p>
+    <label data-i18n="username">Username</label>
     <input type="text" name="username" autofocus required autocomplete="username" />
-    <label>密码</label>
+    <label data-i18n="password">Password</label>
     <input type="password" name="password" required autocomplete="current-password" />
     <input type="hidden" name="next" value="%s" />
-    <button type="submit">登录</button>
+    <button type="submit" data-i18n="login">Login</button>
   </form>
+  <script>
+    const i18n = {
+      en: {
+        title: "apiproxy Admin",
+        subtitle: "Enter your credentials to access the dashboard.",
+        username: "Username",
+        password: "Password",
+        login: "Login",
+        langToggle: "中文"
+      },
+      zh: {
+        title: "apiproxy 管理后台",
+        subtitle: "请输入账号和密码以访问仪表板。",
+        username: "账号",
+        password: "密码",
+        login: "登录",
+        langToggle: "English"
+      }
+    };
+    let currentLang = localStorage.getItem("apiproxy_lang") || (navigator.language.startsWith("zh") ? "zh" : "en");
+    function applyLang() {
+      document.querySelectorAll("[data-i18n]").forEach(el => {
+        const key = el.getAttribute("data-i18n");
+        if (i18n[currentLang][key]) el.textContent = i18n[currentLang][key];
+      });
+      document.getElementById("langBtn").textContent = i18n[currentLang].langToggle;
+      document.documentElement.lang = currentLang === "zh" ? "zh-CN" : "en";
+    }
+    function toggleLang() {
+      currentLang = currentLang === "en" ? "zh" : "en";
+      localStorage.setItem("apiproxy_lang", currentLang);
+      document.cookie = "lang=" + currentLang + "; path=/; max-age=" + (365*24*60*60);
+      applyLang();
+    }
+    applyLang();
+  </script>
 </body>
 </html>`
 
 // loginHTMLWithErr is the same as loginHTML but shows an error banner. It
 // takes two %s: the escaped "next" path and the (already-safe) error message.
 const loginHTMLWithErr = `<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>apiproxy 登录</title>
+  <title>apiproxy Admin</title>
   <style>
     :root {
       color-scheme: light;
@@ -166,19 +221,72 @@ const loginHTMLWithErr = `<!doctype html>
       margin-bottom: 16px;
       display: block;
     }
+    .lang-switch {
+      text-align: right;
+      margin-bottom: 12px;
+    }
+    .lang-btn {
+      background: none;
+      border: none;
+      color: var(--primary);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+      width: auto;
+    }
+    .lang-btn:hover { text-decoration: underline; filter: none; }
   </style>
 </head>
 <body>
   <form class="login-card" method="POST" action="/login">
-    <h1>apiproxy 管理后台</h1>
-    <p class="subtitle">请输入账号和密码以访问仪表板。</p>
+    <div class="lang-switch">
+      <button type="button" class="lang-btn" onclick="toggleLang()" id="langBtn">中文</button>
+    </div>
+    <h1 data-i18n="title">apiproxy Admin</h1>
+    <p class="subtitle" data-i18n="subtitle">Enter your credentials to access the dashboard.</p>
     <span class="err">%s</span>
-    <label>账号</label>
+    <label data-i18n="username">Username</label>
     <input type="text" name="username" autofocus required autocomplete="username" />
-    <label>密码</label>
+    <label data-i18n="password">Password</label>
     <input type="password" name="password" required autocomplete="current-password" />
     <input type="hidden" name="next" value="%s" />
-    <button type="submit">登录</button>
+    <button type="submit" data-i18n="login">Login</button>
   </form>
+  <script>
+    const i18n = {
+      en: {
+        title: "apiproxy Admin",
+        subtitle: "Enter your credentials to access the dashboard.",
+        username: "Username",
+        password: "Password",
+        login: "Login",
+        langToggle: "中文"
+      },
+      zh: {
+        title: "apiproxy 管理后台",
+        subtitle: "请输入账号和密码以访问仪表板。",
+        username: "账号",
+        password: "密码",
+        login: "登录",
+        langToggle: "English"
+      }
+    };
+    let currentLang = localStorage.getItem("apiproxy_lang") || (navigator.language.startsWith("zh") ? "zh" : "en");
+    function applyLang() {
+      document.querySelectorAll("[data-i18n]").forEach(el => {
+        const key = el.getAttribute("data-i18n");
+        if (i18n[currentLang][key]) el.textContent = i18n[currentLang][key];
+      });
+      document.getElementById("langBtn").textContent = i18n[currentLang].langToggle;
+      document.documentElement.lang = currentLang === "zh" ? "zh-CN" : "en";
+    }
+    function toggleLang() {
+      currentLang = currentLang === "en" ? "zh" : "en";
+      localStorage.setItem("apiproxy_lang", currentLang);
+      document.cookie = "lang=" + currentLang + "; path=/; max-age=" + (365*24*60*60);
+      applyLang();
+    }
+    applyLang();
+  </script>
 </body>
 </html>`

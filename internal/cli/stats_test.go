@@ -46,17 +46,36 @@ func TestPrintStatsDefault(t *testing.T) {
 		t.Fatalf("PrintStats: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "最近") {
+	if !strings.Contains(out, "Stats for last") {
 		t.Errorf("output missing header, got:\n%s", out)
 	}
 	if !strings.Contains(out, "openai") || !strings.Contains(out, "gpt-4o-mini") {
 		t.Errorf("output missing openai row:\n%s", out)
 	}
-	if !strings.Contains(out, "按上下文长度分桶") {
+	if !strings.Contains(out, "By context length bucket") {
 		t.Errorf("output missing buckets section:\n%s", out)
 	}
-	if !strings.Contains(out, "时间序列趋势") {
+	if !strings.Contains(out, "Time series trend") {
 		t.Errorf("output missing timeseries section:\n%s", out)
+	}
+}
+
+func TestPrintStatsChinese(t *testing.T) {
+	path := seedDB(t)
+	var buf bytes.Buffer
+	err := PrintStats(context.Background(), &buf, StatsOptions{Window: 10 * time.Minute, DBPath: path, Lang: "zh"})
+	if err != nil {
+		t.Fatalf("PrintStats: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "最近") {
+		t.Errorf("output missing zh header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "按上下文长度分桶") {
+		t.Errorf("output missing zh buckets section:\n%s", out)
+	}
+	if !strings.Contains(out, "时间序列趋势") {
+		t.Errorf("output missing zh timeseries section:\n%s", out)
 	}
 }
 

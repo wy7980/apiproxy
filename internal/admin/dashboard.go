@@ -137,6 +137,241 @@ const dashboardHTML = `<!doctype html>
     .route-target-row { display: grid; grid-template-columns: 72px minmax(140px, 1fr) 52px minmax(180px, 2fr) 100px 76px 34px; gap: 6px; margin-bottom: 6px; align-items: center; }
     .route-fallback { line-height: 1.8; white-space: normal; }
     .icon-btn { padding: 4px 9px; min-width: auto; width: auto; font-size: 12px; }
+
+    /* ===== Provider cards — multi-column grid with color strips ===== */
+    .providers-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+      gap: 14px;
+    }
+    .provider-config-card {
+      display: flex;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: box-shadow 0.2s ease;
+    }
+    .provider-color-bar {
+      width: 4px;
+      flex-shrink: 0;
+    }
+    .provider-config-body {
+      flex: 1;
+      min-width: 0;
+      padding: 14px 16px;
+    }
+    .provider-config-card:hover {
+      box-shadow: 0 2px 8px rgba(49, 94, 251, 0.08);
+    }
+    .provider-config-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .provider-config-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .provider-config-title .provider-icon {
+      font-size: 16px;
+    }
+    .provider-config-title .provider-name-display {
+      font-weight: 600;
+      font-size: 15px;
+      color: var(--text);
+    }
+    .provider-config-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .provider-config-actions button {
+      width: auto;
+      min-width: auto;
+      padding: 4px 10px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .provider-duplicate-btn {
+      background: #fff;
+      border-color: var(--border);
+      color: var(--muted);
+    }
+    .provider-duplicate-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    /* Single-column form rows */
+    .provider-form-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+    }
+    .provider-form-row + .provider-form-row {
+      border-top: 1px solid #f0f1f5;
+    }
+    .provider-form-label {
+      width: 110px;
+      flex-shrink: 0;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: right;
+    }
+    .provider-form-input {
+      flex: 1;
+      min-width: 0;
+    }
+    .provider-form-input input,
+    .provider-form-input select {
+      width: 100%;
+      min-width: 0;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+    .api-key-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .api-key-wrapper input {
+      padding-right: 32px;
+    }
+    .api-key-toggle {
+      position: absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 4px;
+      font-size: 14px;
+      line-height: 1;
+      width: auto;
+      min-width: auto;
+    }
+    .api-key-toggle:hover { color: var(--primary); }
+
+    /* ===== Route cards — multi-column grid ===== */
+    .routes-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+      gap: 14px;
+    }
+    .route-card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: box-shadow 0.2s ease;
+    }
+    .route-card:hover {
+      box-shadow: 0 2px 8px rgba(49, 94, 251, 0.08);
+    }
+    .route-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      user-select: none;
+      padding: 10px 14px;
+      background: #f8f9fc;
+      border-bottom: 1px solid var(--border);
+    }
+    .route-card-header:hover { background: rgba(49, 94, 251, 0.06); }
+    .route-card-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .route-name { font-weight: 600; font-size: 14px; }
+    .route-summary { font-size: 11px; color: var(--muted); }
+    .route-toggle { font-size: 12px; color: var(--muted); transition: transform 0.15s; }
+    .route-card.collapsed .route-toggle { transform: rotate(-90deg); }
+    .route-card.collapsed .route-card-content { display: none; }
+    .route-card-header-actions { display: flex; align-items: center; gap: 6px; }
+    .route-card-content { padding: 12px 14px; }
+
+    /* Provider target cards (reorderable) */
+    .provider-list { margin-bottom: 8px; }
+    .provider-card {
+      background: #f8f9fc;
+      border: 1px solid #e0e4f0;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: box-shadow 0.15s, opacity 0.15s;
+    }
+    .provider-card.dragging { opacity: 0.4; box-shadow: 0 6px 16px rgba(0,0,0,0.18); }
+    .provider-card.drag-over { border-color: var(--primary); border-style: dashed; }
+    .drag-handle {
+      cursor: grab; color: #9aa3b2; font-size: 16px; user-select: none;
+      padding: 4px 6px; border-radius: 4px; line-height: 1;
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .drag-handle:hover { background: #e9efff; color: var(--primary); }
+    .provider-fields {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) 90px 70px;
+      gap: 8px;
+      align-items: center;
+    }
+    .provider-fields .field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .provider-fields .field-label { font-size: 11px; color: var(--muted); }
+    .provider-fields input, .provider-fields select {
+      width: 100%;
+      min-width: 0;
+      padding: 5px 8px;
+      font-size: 13px;
+    }
+    .provider-actions { display: flex; flex-direction: column; gap: 4px; }
+    .sort-btn {
+      padding: 1px 7px; min-width: auto; width: auto; font-size: 12px;
+      line-height: 1.4; background: #fff; border-color: var(--border); color: var(--muted);
+    }
+    .sort-btn:hover { border-color: var(--primary); color: var(--primary); }
+    .provider-del-btn {
+      padding: 2px 8px; min-width: auto; width: auto; font-size: 13px;
+      line-height: 1.4; background: #fff; border-color: var(--border); color: var(--danger);
+    }
+    .provider-del-btn:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+
+    .fallback-section {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--border);
+    }
+    .fallback-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .fallback-grid .fb-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      padding: 4px 0;
+    }
+    .fallback-grid input[type="number"] { width: 80px; }
+    .fallback-grid input[type="text"] { width: 100%; }
+
+    @media (max-width: 900px) {
+      .provider-fields { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 560px) {
+      .provider-fields { grid-template-columns: 1fr; }
+    }
     .toast {
       position: fixed; right: 24px; bottom: 24px; z-index: 9999;
       padding: 12px 18px; border-radius: 10px; color: #fff; font-size: 14px;
@@ -278,6 +513,8 @@ const dashboardHTML = `<!doctype html>
       <div class="config-head">
         <h2 data-i18n="title_config">Config Management</h2>
         <div class="row-controls">
+          <button id="addProviderBtn" class="icon-btn" data-i18n="btn_add_provider">+ Add Provider</button>
+          <button id="addRouteBtn" class="icon-btn" data-i18n="btn_add_route">+ Add Route</button>
           <button id="saveConfigBtn" class="icon-btn" data-i18n="btn_save">Save</button>
         </div>
       </div>
@@ -287,34 +524,10 @@ const dashboardHTML = `<!doctype html>
           <button id="tab-routes" class="tab" data-tab="routes">Routes</button>
         </div>
         <div id="panel-providers" class="panel active">
-          <div class="row-controls">
-            <button id="addProviderBtn" class="icon-btn" data-i18n="btn_add_provider">+ Add Provider</button>
-          </div>
-          <div class="table-wrap">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>Name</th><th>Base URL</th><th>API Key</th><th>API Key Env</th><th>Auth Header</th><th>Timeout</th><th></th>
-                </tr>
-              </thead>
-              <tbody id="providersBody"></tbody>
-            </table>
-          </div>
+          <div id="providersBody" class="providers-list"></div>
         </div>
         <div id="panel-routes" class="panel">
-          <div class="row-controls">
-            <button id="addRouteBtn" class="icon-btn" data-i18n="btn_add_route">+ Add Route</button>
-          </div>
-          <div class="table-wrap">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>Name</th><th>Strategy</th><th>Providers (provider/model/tier/weight)</th><th>Fallback</th><th></th>
-                </tr>
-              </thead>
-              <tbody id="routesBody"></tbody>
-            </table>
-          </div>
+          <div id="routesBody" class="routes-list"></div>
         </div>
       </div>
     </div>
@@ -350,7 +563,25 @@ const i18n = {
     filter_all: "All",
     no_data: "No data matches current filter",
     no_providers: "No providers yet — click Add to create one",
+    label_provider_name: "Name",
+    label_base_url: "Base URL",
+    label_api_key: "API Key",
+    label_api_key_env: "API Key Env",
+    label_auth_header: "Auth Header",
+    label_timeout: "Timeout",
+    label_tier: "Tier",
+    label_providers: "Providers",
     no_routes: "No routes yet — click Add to create one",
+    label_providers_ordered: "Providers (tried in order)",
+    btn_add_provider_target: "+ Add provider target",
+    label_fallback_policy: "Fallback Policy",
+    label_allow_downgrade: "Allow downgrade",
+    tooltip_drag_to_reorder: "Drag to reorder",
+    tooltip_move_up: "Move up",
+    tooltip_move_down: "Move down",
+    summary_strategy: "strategy",
+    summary_providers_one: "provider",
+    summary_providers_many: "providers",
     title_summary: "Model Performance Summary",
     title_tokens: "Model Token Totals",
     title_latency: "Latency Trend",
@@ -405,7 +636,25 @@ const i18n = {
     filter_all: "全部",
     no_data: "当前筛选范围内没有数据",
     no_providers: "暂无 provider，点右上角新增",
+    label_provider_name: "名称",
+    label_base_url: "Base URL",
+    label_api_key: "API Key",
+    label_api_key_env: "API Key Env",
+    label_auth_header: "鉴权头",
+    label_timeout: "超时",
+    label_tier: "Tier",
+    label_providers: "Providers",
     no_routes: "暂无 route，点右上角新增",
+    label_providers_ordered: "Providers（按顺序尝试）",
+    btn_add_provider_target: "+ 新增 provider 目标",
+    label_fallback_policy: "Fallback 策略",
+    label_allow_downgrade: "允许降级",
+    tooltip_drag_to_reorder: "拖拽排序",
+    tooltip_move_up: "上移",
+    tooltip_move_down: "下移",
+    summary_strategy: "策略",
+    summary_providers_one: "个 provider",
+    summary_providers_many: "个 provider",
     title_summary: "模型性能汇总",
     title_tokens: "模型 Token 总量",
     title_latency: "延迟趋势",
@@ -902,32 +1151,25 @@ function renderProviders() {
   var body = eid("providersBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.providers.length; i++) {
-    body.appendChild(providerRow(cfgState.providers[i], i));
+    body.appendChild(providerConfigCard(cfgState.providers[i], i));
   }
   if (cfgState.providers.length === 0) {
-    body.appendChild(el("tr", null, [el("td", {colspan: "7", class: "muted"}, [t.no_providers || "No providers yet — click Add to create one"])]));
+    body.appendChild(el("div", {class: "muted", style: "padding: 20px 0; text-align: center"}, [t.no_providers || "No providers yet — click Add to create one"]));
   }
 }
 
-function providerRow(p, idx) {
+function providerConfigCard(p, idx) {
   var t = i18n[currentLang];
-  var authSel = el("select", null, [
-    el("option", {value: "both"}, ["both (recommended)"]),
-    el("option", {value: "authorization"}, ["authorization"]),
-    el("option", {value: "x-api-key"}, ["x-api-key"])
-  ]);
-  authSel.value = p.auth_header || "both";
-  authSel.addEventListener("change", function() { cfgState.providers[idx].auth_header = authSel.value; });
 
-  var tierSel = el("select", null, [
-    el("option", {value: ""}, ["-"]),
-    el("option", {value: "advanced"}, ["advanced"]),
-    el("option", {value: "standard"}, ["standard"])
-  ]);
-  tierSel.value = p.tier || "";
-  tierSel.addEventListener("change", function() { cfgState.providers[idx].tier = tierSel.value; });
+  // Single-column form row: label (right-aligned) + input
+  function formRow(labelText, control) {
+    return el("div", {class: "provider-form-row"}, [
+      el("span", {class: "provider-form-label"}, [labelText]),
+      el("div", {class: "provider-form-input"}, [control])
+    ]);
+  }
 
-  var nameInput = el("input", {type: "text", value: p.name || ""});
+  var nameInput = el("input", {type: "text", value: p.name || "", placeholder: t.label_provider_name || "Name"});
   nameInput.addEventListener("input", function() {
     cfgState.providers[idx].name = nameInput.value.trim();
     cfgState.providerNames = cfgState.providers.map(function(x) { return x.name; }).filter(Boolean).sort();
@@ -937,15 +1179,64 @@ function providerRow(p, idx) {
   var urlInput = el("input", {type: "text", value: p.base_url || "", placeholder: "https://..."});
   urlInput.addEventListener("input", function() { cfgState.providers[idx].base_url = urlInput.value; });
 
+  // API Key with eye toggle
   var keyInput = el("input", {type: "password", value: p.api_key || "", placeholder: p.api_key ? MASKED : "(empty)"});
   keyInput.addEventListener("input", function() { cfgState.providers[idx].api_key = keyInput.value; });
+  var keyWrapper = el("div", {class: "api-key-wrapper"}, [keyInput]);
+  var keyToggle = el("button", {class: "api-key-toggle", title: "Toggle visibility"}, ["👁"]);
+  keyToggle.addEventListener("click", function(e) {
+    e.preventDefault();
+    if (keyInput.type === "password") {
+      keyInput.type = "text";
+      if (cfgState.providers[idx].api_key) keyInput.value = cfgState.providers[idx].api_key;
+    } else {
+      keyInput.type = "password";
+      if (cfgState.providers[idx].api_key) keyInput.value = MASKED;
+    }
+  });
+  keyWrapper.appendChild(keyToggle);
 
   var keyEnvInput = el("input", {type: "text", value: p.api_key_env || "", placeholder: "ENV var name (optional)"});
   keyEnvInput.addEventListener("input", function() { cfgState.providers[idx].api_key_env = keyEnvInput.value; });
 
+  var authSel = el("select", null, [
+    el("option", {value: "both"}, ["both (recommended)"]),
+    el("option", {value: "authorization"}, ["authorization"]),
+    el("option", {value: "x-api-key"}, ["x-api-key"])
+  ]);
+  authSel.value = p.auth_header || "both";
+  authSel.addEventListener("change", function() { cfgState.providers[idx].auth_header = authSel.value; });
+
   var timeoutInput = el("input", {type: "text", value: p.timeout || "60s"});
   timeoutInput.addEventListener("input", function() { cfgState.providers[idx].timeout = timeoutInput.value; });
 
+  var tierSel = el("select", null, [
+    el("option", {value: ""}, ["-"]),
+    el("option", {value: "advanced"}, ["advanced"]),
+    el("option", {value: "standard"}, ["standard"])
+  ]);
+  tierSel.value = p.tier || "";
+  tierSel.addEventListener("change", function() { cfgState.providers[idx].tier = tierSel.value; });
+
+  // Duplicate button
+  var dupBtn = el("button", {class: "provider-duplicate-btn icon-btn", title: "Duplicate"}, ["⧉"]);
+  dupBtn.addEventListener("click", function() {
+    var copy = {
+      name: p.name + "-copy",
+      base_url: p.base_url,
+      api_key: p.api_key,
+      api_key_env: p.api_key_env,
+      auth_header: p.auth_header,
+      timeout: p.timeout,
+      tier: p.tier
+    };
+    cfgState.providers.splice(idx + 1, 0, copy);
+    cfgState.providerNames = cfgState.providers.map(function(x) { return x.name; }).filter(Boolean).sort();
+    renderProviders();
+    refreshRouteProviderOptions();
+  });
+
+  // Delete button
   var delBtn = el("button", {class: "icon-btn", title: t.btn_delete || "Delete"}, [t.btn_delete || "Delete"]);
   delBtn.addEventListener("click", function() {
     if (!confirm((t.confirm_delete_provider || "Delete provider \"") + (p.name || "") + (t.confirm_end || "\"?"))) return;
@@ -955,15 +1246,30 @@ function providerRow(p, idx) {
     refreshRouteProviderOptions();
   });
 
-  return el("tr", null, [
-    el("td", null, [nameInput]),
-    el("td", null, [urlInput]),
-    el("td", null, [keyInput]),
-    el("td", null, [keyEnvInput]),
-    el("td", null, [authSel]),
-    el("td", null, [timeoutInput]),
-    el("td", null, [tierSel, " ", delBtn])
+  // Header with name display + actions
+  var head = el("div", {class: "provider-config-head"}, [
+    el("div", {class: "provider-config-title"}, [
+      el("span", {class: "provider-icon"}, ["⚡"]),
+      el("span", {class: "provider-name-display"}, [p.name || (t.label_provider_name || "Name")])
+    ]),
+    el("div", {class: "provider-config-actions"}, [dupBtn, delBtn])
   ]);
+
+  // Color bar + body wrapper
+  var colorIdx = idx % CHART_COLORS.length;
+  var colorBar = el("div", {class: "provider-color-bar", style: "background:" + CHART_COLORS[colorIdx]});
+  var body = el("div", {class: "provider-config-body"}, [
+    head,
+    formRow(t.label_provider_name || "Name", nameInput),
+    formRow(t.label_base_url || "Base URL", urlInput),
+    formRow(t.label_api_key || "API Key", keyWrapper),
+    formRow(t.label_api_key_env || "API Key Env", keyEnvInput),
+    formRow(t.label_auth_header || "Auth Header", authSel),
+    formRow(t.label_timeout || "Timeout", timeoutInput),
+    formRow(t.label_tier || "Tier", tierSel)
+  ]);
+
+  return el("div", {class: "provider-config-card"}, [colorBar, body]);
 }
 
 function addProvider() {
@@ -976,6 +1282,7 @@ function addProvider() {
     timeout: "60s",
     tier: ""
   });
+  switchTab("providers");
   renderProviders();
   refreshRouteProviderOptions();
 }
@@ -985,10 +1292,10 @@ function renderRoutes() {
   var body = eid("routesBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.routes.length; i++) {
-    body.appendChild(routeRow(cfgState.routes[i], i));
+    body.appendChild(routeCard(cfgState.routes[i], i));
   }
   if (cfgState.routes.length === 0) {
-    body.appendChild(el("tr", null, [el("td", {colspan: "4", class: "muted"}, [t.no_routes || "No routes yet — click Add to create one"])]));
+    body.appendChild(el("div", {class: "muted", style: "padding: 20px 0; text-align: center"}, [t.no_routes || "No routes yet — click Add to create one"]));
   }
 }
 
@@ -1000,118 +1307,289 @@ function strategyOptions(sel, current) {
   });
 }
 
-function routeRow(r, idx) {
+function routeSummary(r) {
+  var t = i18n[currentLang];
+  var n = r.providers ? r.providers.length : 0;
+  var unit = n === 1 ? (t.summary_providers_one || "provider") : (t.summary_providers_many || "providers");
+  return (r.strategy || "priority") + " • " + n + " " + unit;
+}
+
+function routeCard(r, idx) {
   var t = i18n[currentLang];
   if (!r) r = {};
   if (!Array.isArray(r.providers)) r.providers = [];
   if (!r.fallback) r.fallback = {};
-  var nameInput = el("input", {type: "text", value: r.name || ""});
-  nameInput.addEventListener("input", function() { cfgState.routes[idx].name = nameInput.value.trim(); });
 
-  var stratSel = el("select", null, []);
-  strategyOptions(stratSel, r.strategy || "priority");
-  stratSel.addEventListener("change", function() { cfgState.routes[idx].strategy = stratSel.value; });
+  // Color the route header background
+  var routeColor = CHART_COLORS[idx % CHART_COLORS.length];
+  var card = el("div", {class: "route-card"});
+  card.dataset.routeIdx = String(idx);
+  var content = el("div", {class: "route-card-content"});
 
-  var providersCell = el("td", null, []);
-  var fallbackCell = el("td", null, []);
-  function refreshProviders() {
-    providersCell.innerHTML = "";
-    for (var j = 0; j < r.providers.length; j++) {
-      providersCell.appendChild(providerTargetRow(r, j));
-    }
-  }
-  function refreshFallback() {
-    fallbackCell.innerHTML = "";
-    if (!r.fallback) r.fallback = {};
-    var fb = r.fallback;
-    var fbCheck = el("input", {type: "checkbox"});
-    fbCheck.checked = !!fb.enabled;
-    fbCheck.addEventListener("change", function() { r.fallback.enabled = fbCheck.checked; });
-    var statusInput = el("input", {type: "text", value: (fb.on_status || []).join(","), placeholder: "e.g. 429,500,503", style: "margin-top:6px; width:220px"});
-    statusInput.addEventListener("input", function() {
-      r.fallback.on_status = statusInput.value.split(",").map(function(s) { return parseInt(s.trim(), 10); }).filter(function(n) { return !isNaN(n); });
-    });
-    var maxInput = el("input", {type: "number", value: String(fb.max_attempts || 0), style: "margin-top:6px; width:80px"});
-    maxInput.addEventListener("input", function() { r.fallback.max_attempts = parseInt(maxInput.value || "0", 10); });
-    var toCheck = el("input", {type: "checkbox"});
-    toCheck.checked = !!fb.on_timeout;
-    toCheck.addEventListener("change", function() { r.fallback.on_timeout = toCheck.checked; });
-    var connCheck = el("input", {type: "checkbox"});
-    connCheck.checked = !!fb.on_connect_error;
-    connCheck.addEventListener("change", function() { r.fallback.on_connect_error = connCheck.checked; });
-    fallbackCell.appendChild(el("label", {class: "route-fallback"}, [fbCheck, " enabled"]));
-    fallbackCell.appendChild(el("div", {class: "route-fallback"}, [
-      "max_attempts: ", maxInput,
-      el("div", {style: "margin-top:6px"}, [toCheck, " on_timeout"]),
-      el("div", {style: "margin-top:4px"}, [connCheck, " on_connect_error"]),
-      el("div", {style: "margin-top:6px"}, ["on_status: ", statusInput])
-    ]));
-  }
-  refreshProviders();
-  refreshFallback();
-
-  var addTargetBtn = el("button", {class: "icon-btn"}, ["+ provider target"]);
-  addTargetBtn.addEventListener("click", function() {
-    r.providers.push({ provider: "", model: "", tier: "", weight: 0 });
-    refreshProviders();
+  // --- Header (collapsible) ---
+  var nameInput = el("input", {type: "text", value: r.name || "", style: "width:170px; font-weight:600; background:transparent; border:1px solid transparent; outline:none; padding:2px 6px; border-radius:6px"});
+  nameInput.addEventListener("focus", function() { nameInput.style.borderColor = "var(--border)"; });
+  nameInput.addEventListener("blur", function() { nameInput.style.borderColor = "transparent"; });
+  nameInput.addEventListener("click", function(e) { e.stopPropagation(); });
+  nameInput.addEventListener("input", function() {
+    cfgState.routes[idx].name = nameInput.value.trim();
+    var summ = header.querySelector(".route-summary");
+    if (summ) summ.textContent = routeSummary(cfgState.routes[idx]);
   });
 
+  var stratSel = el("select", {style: "font-size:12px; padding:2px 6px; width:auto; border-color:var(--border)"}, []);
+  strategyOptions(stratSel, r.strategy || "priority");
+  stratSel.addEventListener("change", function() {
+    cfgState.routes[idx].strategy = stratSel.value;
+    var summ = header.querySelector(".route-summary");
+    if (summ) summ.textContent = routeSummary(cfgState.routes[idx]);
+  });
+  stratSel.addEventListener("click", function(e) { e.stopPropagation(); });
+
+  var summary = el("span", {class: "route-summary"}, [routeSummary(r)]);
+  var toggle = el("span", {class: "route-toggle"}, ["▼"]);
+
   var delBtn = el("button", {class: "icon-btn", title: t.btn_delete || "Delete route"}, [t.btn_delete || "Delete"]);
-  delBtn.addEventListener("click", function() {
+  delBtn.addEventListener("click", function(e) {
+    e.stopPropagation();
     if (!confirm((t.confirm_delete_route || "Delete route \"") + (r.name || "") + (t.confirm_end || "\"?"))) return;
     cfgState.routes.splice(idx, 1);
     renderRoutes();
   });
 
-  return el("tr", null, [
-    el("td", null, [nameInput]),
-    el("td", null, [stratSel]),
-    el("td", null, [providersCell, el("div", {style: "margin-top:6px"}, [addTargetBtn])]),
-    el("td", null, [fallbackCell]),
-    el("td", null, [delBtn])
+  var titleLeft = el("div", {class: "route-card-title"}, [toggle, nameInput, stratSel, summary]);
+  var header = el("div", {class: "route-card-header"}, [
+    titleLeft,
+    el("div", {class: "route-card-header-actions"}, [delBtn])
   ]);
+  // Apply color tint to header
+  var rgb = hexToRgb(routeColor);
+  header.style.background = "rgba(" + rgb.r + "," + rgb.g + "," + rgb.b + ", 0.06)";
+  header.addEventListener("click", function() {
+    card.classList.toggle("collapsed");
+  });
+
+  // --- Providers section ---
+  var providerList = el("div", {class: "provider-list"}, []);
+  var providerLabel = el("div", {style: "font-size:12px; color:var(--muted); margin-bottom:8px; font-weight:600"}, [t.label_providers_ordered || "Providers (tried in order)"]);
+
+  function refreshProviders() {
+    providerList.innerHTML = "";
+    for (var j = 0; j < r.providers.length; j++) {
+      providerList.appendChild(providerTargetCard(r, j, refreshProviders));
+    }
+    summary.textContent = routeSummary(r);
+  }
+
+  var addTargetBtn = el("button", {class: "icon-btn"}, [t.btn_add_provider_target || "+ Add provider target"]);
+  addTargetBtn.addEventListener("click", function() {
+    r.providers.push({ provider: "", model: "", tier: "", weight: 0 });
+    refreshProviders();
+  });
+
+  // --- Fallback section ---
+  var fbSection = el("div", {class: "fallback-section"}, []);
+  buildFallback(fbSection, r);
+
+  content.appendChild(providerLabel);
+  content.appendChild(providerList);
+  content.appendChild(addTargetBtn);
+  content.appendChild(fbSection);
+
+  card.appendChild(header);
+  card.appendChild(content);
+  refreshProviders();
+  return card;
 }
 
-function providerTargetRow(route, j) {
-  var t = route.providers[j];
+// providerTargetCard renders one reorderable provider target. onReorder is a
+// closure that re-renders the parent route's provider list after any mutation.
+function providerTargetCard(route, j, onReorder) {
+  var t = i18n[currentLang];
+  var target = route.providers[j];
+  if (!target) return el("div");
+
+  function field(labelText, control) {
+    return el("div", {class: "field"}, [
+      el("span", {class: "field-label"}, [labelText]),
+      control
+    ]);
+  }
+
   var provSel = el("select", null, [el("option", {value: ""}, ["-"])]);
   cfgState.providerNames.forEach(function(n) {
     provSel.appendChild(el("option", {value: n}, [n]));
   });
-  provSel.value = t.provider || "";
-  provSel.addEventListener("change", function() { t.provider = provSel.value; });
+  provSel.value = target.provider || "";
+  provSel.addEventListener("change", function() { target.provider = provSel.value; });
 
-  var modelInput = el("input", {type: "text", value: t.model || "", placeholder: "model name"});
-  modelInput.addEventListener("input", function() { t.model = modelInput.value; });
+  var modelInput = el("input", {type: "text", value: target.model || "", placeholder: "model name"});
+  modelInput.addEventListener("input", function() { target.model = modelInput.value; });
 
   var tierSel = el("select", null, [
     el("option", {value: ""}, ["-"]),
     el("option", {value: "advanced"}, ["advanced"]),
     el("option", {value: "standard"}, ["standard"])
   ]);
-  tierSel.value = t.tier || "";
-  tierSel.addEventListener("change", function() { t.tier = tierSel.value; });
+  tierSel.value = target.tier || "";
+  tierSel.addEventListener("change", function() { target.tier = tierSel.value; });
 
-  var weightInput = el("input", {type: "number", value: String(t.weight || 0), style: "width:64px"});
-  weightInput.addEventListener("input", function() { t.weight = parseInt(weightInput.value || "0", 10); });
+  var weightInput = el("input", {type: "number", value: String(target.weight || 0), placeholder: "weight"});
+  weightInput.addEventListener("input", function() { target.weight = parseInt(weightInput.value || "0", 10); });
 
-  var delBtn = el("button", {class: "icon-btn", title: "Delete"}, ["x"]);
+  // Order controls: up/down buttons + drag handle.
+  var upBtn = el("button", {class: "sort-btn", title: t.tooltip_move_up || "Move up"}, ["↑"]);
+  upBtn.addEventListener("click", function() { moveProvider(route, j, -1, onReorder); });
+  var downBtn = el("button", {class: "sort-btn", title: t.tooltip_move_down || "Move down"}, ["↓"]);
+  downBtn.addEventListener("click", function() { moveProvider(route, j, 1, onReorder); });
+
+  var delBtn = el("button", {class: "provider-del-btn", title: t.btn_delete || "Delete"}, ["x"]);
   delBtn.addEventListener("click", function() {
     route.providers.splice(j, 1);
-    renderRoutes();
+    onReorder();
   });
 
-  var wrap = el("div", {class: "route-target-row"}, [
-    el("span", null, ["provider:"]), provSel,
-    el("span", null, ["model:"]), modelInput,
-    tierSel, weightInput, delBtn
+  var handle = el("span", {class: "drag-handle", title: t.tooltip_drag_to_reorder || "Drag to reorder"}, ["☰"]);
+
+  var card = el("div", {class: "provider-card"}, []);
+  card.dataset.idx = String(j);
+
+  var fields = el("div", {class: "provider-fields"}, [
+    field("Provider", provSel),
+    field("Model", modelInput),
+    field("Tier", tierSel),
+    field("Weight", weightInput)
   ]);
-  return wrap;
+
+  var actions = el("div", {class: "provider-actions"}, [upBtn, downBtn, delBtn]);
+
+  card.appendChild(handle);
+  card.appendChild(fields);
+  card.appendChild(actions);
+
+  // --- Drag & drop wiring (drag is enabled only while pressing the handle) ---
+  handle.addEventListener("mousedown", function() { card.draggable = true; });
+  handle.addEventListener("mouseup", function() { card.draggable = false; });
+
+  card.addEventListener("dragstart", function(e) {
+    dragState.route = route;
+    dragState.fromIdx = j;
+    dragState.onReorder = onReorder;
+    card.classList.add("dragging");
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", String(j)); } catch (err) {}
+    }
+  });
+  card.addEventListener("dragend", function() {
+    card.draggable = false;
+    card.classList.remove("dragging");
+    var list = card.parentNode;
+    if (list) {
+      var siblings = list.querySelectorAll(".provider-card.drag-over");
+      for (var i = 0; i < siblings.length; i++) siblings[i].classList.remove("drag-over");
+    }
+    dragState.route = null;
+    dragState.fromIdx = -1;
+    dragState.onReorder = null;
+  });
+  card.addEventListener("dragover", function(e) {
+    if (dragState.route !== route) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    card.classList.add("drag-over");
+  });
+  card.addEventListener("dragleave", function() {
+    card.classList.remove("drag-over");
+  });
+  card.addEventListener("drop", function(e) {
+    e.preventDefault();
+    card.classList.remove("drag-over");
+    if (dragState.route !== route) return;
+    var from = dragState.fromIdx;
+    var to = j;
+    if (from === to || from < 0) return;
+    var moved = route.providers.splice(from, 1)[0];
+    route.providers.splice(to, 0, moved);
+    if (dragState.onReorder) dragState.onReorder();
+  });
+
+  return card;
+}
+
+// dragState holds the in-flight drag source for provider reordering.
+var dragState = { route: null, fromIdx: -1, onReorder: null };
+
+// moveProvider swaps a provider target with its neighbor in the given direction.
+function moveProvider(route, j, dir, onReorder) {
+  var target = j + dir;
+  if (target < 0 || target >= route.providers.length) return;
+  var tmp = route.providers[j];
+  route.providers[j] = route.providers[target];
+  route.providers[target] = tmp;
+  onReorder();
+}
+
+function hexToRgb(hex) {
+  var result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result ? {
+    r: parseInt(result[1], 16),
+    g: parseInt(result[2], 16),
+    b: parseInt(result[3], 16)
+  } : { r: 0, g: 0, b: 0 };
+}
+
+// buildFallback renders the fallback policy block inside host for route r.
+function buildFallback(host, r) {
+  var t = i18n[currentLang];
+  if (!r.fallback) r.fallback = {};
+  var fb = r.fallback;
+
+  // Aligned form row: label (110px right-aligned) + input area
+  function fbRow(labelText, control) {
+    return el("div", {class: "provider-form-row"}, [
+      el("span", {class: "provider-form-label"}, [labelText]),
+      el("div", {class: "provider-form-input"}, [control])
+    ]);
+  }
+
+  var fbCheck = el("input", {type: "checkbox", style: "width:auto;"});
+  fbCheck.checked = !!fb.enabled;
+  fbCheck.addEventListener("change", function() { fb.enabled = fbCheck.checked; });
+
+  var maxInput = el("input", {type: "number", value: String(fb.max_attempts || 0), style: "width:80px;"});
+  maxInput.addEventListener("input", function() { fb.max_attempts = parseInt(maxInput.value || "0", 10); });
+
+  var toCheck = el("input", {type: "checkbox", style: "width:auto;"});
+  toCheck.checked = !!fb.on_timeout;
+  toCheck.addEventListener("change", function() { fb.on_timeout = toCheck.checked; });
+
+  var connCheck = el("input", {type: "checkbox", style: "width:auto;"});
+  connCheck.checked = !!fb.on_connect_error;
+  connCheck.addEventListener("change", function() { fb.on_connect_error = connCheck.checked; });
+
+  var downCheck = el("input", {type: "checkbox", style: "width:auto;"});
+  downCheck.checked = !!fb.allow_downgrade;
+  downCheck.addEventListener("change", function() { fb.allow_downgrade = downCheck.checked; });
+
+  var statusInput = el("input", {type: "text", value: (fb.on_status || []).join(","), placeholder: "e.g. 429,500,503"});
+  statusInput.addEventListener("input", function() {
+    fb.on_status = statusInput.value.split(",").map(function(s) { return parseInt(s.trim(), 10); }).filter(function(n) { return !isNaN(n); });
+  });
+
+  host.appendChild(el("div", {style: "font-size:12px; color:var(--muted); font-weight:600; margin-bottom:10px;"}, [t.label_fallback_policy || "Fallback Policy"]));
+  host.appendChild(fbRow("Enabled", fbCheck));
+  host.appendChild(fbRow("Max Attempts", maxInput));
+  host.appendChild(fbRow("On Timeout", toCheck));
+  host.appendChild(fbRow("On Conn Error", connCheck));
+  host.appendChild(fbRow("Allow Downgrade", downCheck));
+  host.appendChild(fbRow("On Status", statusInput));
 }
 
 function refreshRouteProviderOptions() {
   renderRoutes();
 }
+
 
 function addRoute() {
   cfgState.routes.push({
@@ -1125,6 +1603,7 @@ function addRoute() {
     },
     providers: []
   });
+  switchTab("routes");
   renderRoutes();
 }
 

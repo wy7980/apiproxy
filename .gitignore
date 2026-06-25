@@ -26,3 +26,6 @@ debug
 
 # Runtime data (SQLite db)
 /data/
+
+/dist
+CLAUDE.md

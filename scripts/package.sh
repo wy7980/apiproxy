@@ -12,6 +12,7 @@
 #
 # Output layout (per platform):
 #   apiproxy-{version}-{os}-{arch}.tar.gz
+#     ├── install.sh            # installation script (run with sudo)
 #     ├── apiproxy              # binary
 #     ├── configs/
 #     │   └── apiproxy.yaml     # example config
@@ -95,6 +96,8 @@ build_and_package() {
   mkdir -p "$stamp_dir/configs"
   cp "$REPO_ROOT/configs/apiproxy.yaml" "$stamp_dir/configs/apiproxy.yaml"
   cp "$REPO_ROOT/README.md" "$stamp_dir/README.md"
+  cp "$REPO_ROOT/scripts/install.sh" "$stamp_dir/install.sh"
+  chmod +x "$stamp_dir/install.sh"
 
   # Create tarball (relative paths inside the archive so it extracts cleanly).
   tar -czf "$tarball" -C "$OUTDIR" \

@@ -113,8 +113,15 @@ func main() {
 		if store == nil {
 			logger.Warn("admin server enabled but storage is disabled; dashboard will not show data")
 		} else {
-			adminUser := os.Getenv(cfg.Admin.UsernameEnv)
-			adminPass := os.Getenv(cfg.Admin.PasswordEnv)
+			// 优先从 YAML 配置直接读取凭据，fallback 到环境变量
+			adminUser := cfg.Admin.Username
+			adminPass := cfg.Admin.Password
+			if adminUser == "" {
+				adminUser = os.Getenv(cfg.Admin.UsernameEnv)
+			}
+			if adminPass == "" {
+				adminPass = os.Getenv(cfg.Admin.PasswordEnv)
+			}
 			if adminUser == "" || adminPass == "" {
 				logger.Error("admin credentials are required", "username_env", cfg.Admin.UsernameEnv, "password_env", cfg.Admin.PasswordEnv)
 				os.Exit(1)

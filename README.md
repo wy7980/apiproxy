@@ -7,7 +7,7 @@
 ## Goals
 
 - **Unified Access**: Agents only call apiproxy's OpenAI-compatible API; apiproxy routes to OpenAI / DeepSeek / Qwen, etc.
-- **Transparent Proxy**: Both `/v1/chat/completions` and `/v1/messages` are passed through as-is — the protocol is determined by the client's request path. The proxy only handles routing and fallback, no format conversion. One provider can serve both OpenAI and Anthropic clients simultaneously.
+- **Transparent Proxy**: Both `/v1/chat/completions` and `/v1/messages` are passed through as-is by default — the protocol is determined by the client's request path. Per route target, an optional `switch` field enables bidirectional protocol conversion (OpenAI ↔ Anthropic), allowing an OpenAI-format client to reach an Anthropic backend transparently.
 - **Real-time Monitoring**: Prometheus metrics + JSON structured logging covering latency, first-token latency, token usage, error rate, and fallback count.
 - **Automatic Fallback**: Falls back to the next provider by priority on timeout / 429 / 5xx / connection errors.
 - **Circuit Breaker**: Simple per-provider circuit breaker state machine (auto-switching not enabled by default).
@@ -34,6 +34,7 @@ apiproxy/
     storage/            SQLite persistence for request events
     admin/              Performance analytics dashboard (HTML+Chart.js)
     cli/                stats subcommand: command line stats query
+    switcher/           Bidirectional protocol conversion (OpenAI ↔ Anthropic)
 ```
 
 ## Quick Start
@@ -95,7 +96,7 @@ curl http://localhost:8080/v1/messages \
   }'
 ```
 
-`/v1/messages` does not perform Anthropic/OpenAI format conversion — it only replaces the `model` field and forwards both request and response bodies to the upstream as-is. The protocol is entirely determined by the client's request path — the same provider can serve both `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) without needing a `type` field configuration.
+`/v1/messages` passes the request and response bodies through as-is by default — only the `model` field is replaced. The protocol is entirely determined by the client's request path — the same provider can serve both `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) without needing a `type` field configuration. To enable format conversion between OpenAI and Anthropic protocols on a per-target basis, use the `switch` field (see [Protocol Switch](#protocol-switch)).
 
 View metrics:
 
@@ -402,7 +403,47 @@ routes:
       - provider: deepseek
         model: deepseek-chat
         tier: standard
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        tier: advanced
+        switch: openai-to-anthropic  # convert OpenAI format to Anthropic
 ```
+
+### Protocol Switch
+
+Each route provider target can optionally specify a `switch` field to enable protocol conversion. This allows an OpenAI-format client to call an Anthropic backend (or vice versa) without any code changes on the client side:
+
+```yaml
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+
+routes:
+  openai-to-claude:
+    strategy: priority
+    providers:
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        tier: advanced
+        switch: openai-to-anthropic  # client sends OpenAI format, proxy converts to Anthropic
+```
+
+| `switch` value | Conversion direction |
+|---|---|
+| *(empty, default)* | No conversion — transparent pass-through |
+| `openai-to-anthropic` | OpenAI → Anthropic request/response format |
+| `anthropic-to-openai` | Anthropic → OpenAI request/response format |
+
+**What gets converted:**
+
+- **Messages**: roles, system prompts, content blocks (text, images, tool results)
+- **Tools**: function definitions, `tool_choice`, parallel tool calls
+- **Parameters**: `max_tokens` ↔ `max_completion_tokens`, `stop` ↔ `stop_sequences`, `reasoning_effort` ↔ `thinking`, `response_format` ↔ `output_config`
+- **Streaming**: full SSE event conversion with state tracking (message_start, content_block_start/delta/stop, message_delta, etc.)
+- **Headers**: provider-specific headers removed on the opposite side (e.g., `anthropic-version` hidden from OpenAI clients, `Authorization` hidden from Anthropic clients)
+
+Conversion works for both non-streaming and streaming responses. If conversion fails at any point, the proxy falls back to passing through the original upstream response with a warning log.
 
 Future extensions include `weighted` / `latency` / `health` strategies.
 
@@ -435,6 +476,7 @@ Future extensions include `weighted` / `latency` / `health` strategies.
 - [x] Credential environment variable injection (provider API key, admin username/password)
 - [x] File log rotation (daily file splitting + gzip compression + auto-cleanup)
 - [x] E2E integration tests (proxy + admin + SQLite real TCP)
+- [x] Protocol switch: bidirectional OpenAI ↔ Anthropic format conversion per route target
 - [ ] Weighted / low-latency / health-first routing
 - [ ] Automatic circuit breaker triggering (state machine exists only currently)
 - [ ] Cost estimation / audit logs

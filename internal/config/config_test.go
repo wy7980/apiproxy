@@ -238,3 +238,39 @@ func writeTempConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+func TestValidateSwitch(t *testing.T) {
+	tests := []struct {
+		name    string
+		sw      string
+		wantErr bool
+	}{
+		{"empty (off)", "", false},
+		{"openai-to-anthropic", "openai-to-anthropic", false},
+		{"anthropic-to-openai", "anthropic-to-openai", false},
+		{"invalid value", "bogus", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := minimalConfig()
+			cfg.Routes["test"] = Route{
+				Providers: []RouteTarget{
+					{Provider: "test-provider", Model: "gpt-4", Switch: tt.sw},
+				},
+			}
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func minimalConfig() *Config {
+	return &Config{
+		Server: ServerConfig{Listen: ":8080"},
+		Providers: map[string]Provider{
+			"test-provider": {BaseURL: "https://example.com", APIKey: "sk-test"},
+		},
+		Routes: make(map[string]Route),
+	}
+}

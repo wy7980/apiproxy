@@ -29,3 +29,8 @@ debug
 
 /dist
 CLAUDE.md
+
+# Local design/working docs (superpowers workflow)
+/docs/superpowers/
+/.clinerules/
+/.qagent/

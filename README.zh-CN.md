@@ -7,7 +7,7 @@
 ## 目标
 
 - **统一接入**: Agent 只调用 apiproxy 的 OpenAI 兼容 API,由 apiproxy 路由到 OpenAI / DeepSeek / Qwen 等。
-- **透明代理**: `/v1/chat/completions` 和 `/v1/messages` 均原样透传——协议由 client 的 request path 决定,proxy 只做路由和 fallback,不做任何格式转换。一个 provider 可以同时服务 OpenAI 和 Anthropic 客户端。
+- **透明代理**: `/v1/chat/completions` 和 `/v1/messages` 默认原样透传——协议由 client 的 request path 决定。每个路由目标可通过 `switch` 字段可选启用双向协议转换（OpenAI ↔ Anthropic），使 OpenAI 格式客户端可直接访问 Anthropic 后端。
 - **实时监控**: Prometheus 指标 + JSON 结构化日志,覆盖延迟、首 token 时延、token 用量、错误率、fallback 次数。
 - **自动 fallback**: 超时 / 429 / 5xx / 连接错误时按优先级 fallback 到下一个 provider。
 - **熔断**: 按 provider 维度的简单熔断状态机(默认未启用自动切换)。
@@ -34,6 +34,7 @@ apiproxy/
     storage/            SQLite 持久化请求事件
     admin/              性能分析 dashboard (HTML+Chart.js)
     cli/                stats 子命令:命令行查询统计
+    switcher/           双向协议转换（OpenAI ↔ Anthropic）
 ```
 
 ## 快速开始
@@ -95,7 +96,7 @@ curl http://localhost:8080/v1/messages \
   }'
 ```
 
-`/v1/messages` 不做 Anthropic/OpenAI 格式转换，只替换 `model` 字段并将请求体和响应体原样透传到上游。协议完全由 client 的 request path 决定——同一个 provider 可以同时服务 `/v1/chat/completions`（OpenAI 格式）和 `/v1/messages`（Anthropic 格式），无需配置 `type` 字段。
+`/v1/messages` 默认将请求体和响应体原样透传，只替换 `model` 字段。协议完全由 client 的 request path 决定——同一个 provider 可以同时服务 `/v1/chat/completions`（OpenAI 格式）和 `/v1/messages`（Anthropic 格式），无需配置 `type` 字段。如需在路由目标级别启用 OpenAI 与 Anthropic 协议之间的格式转换，请使用 `switch` 字段（参见[协议转换](#协议转换)）。
 
 查看指标:
 
@@ -402,7 +403,47 @@ routes:
       - provider: deepseek
         model: deepseek-chat
         tier: standard
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        tier: advanced
+        switch: openai-to-anthropic  # 将 OpenAI 格式转换为 Anthropic
 ```
+
+### 协议转换
+
+每个路由的 provider 目标可以通过 `switch` 字段可选启用协议转换。这让使用 OpenAI 格式的客户端可以直接调用 Anthropic 后端（或反过来），客户端代码无需任何修改：
+
+```yaml
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+
+routes:
+  openai-to-claude:
+    strategy: priority
+    providers:
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        tier: advanced
+        switch: openai-to-anthropic  # 客户端发送 OpenAI 格式，代理自动转换为 Anthropic
+```
+
+| `switch` 值 | 转换方向 |
+|---|---|
+| *空（默认）* | 不转换——原样透传 |
+| `openai-to-anthropic` | OpenAI → Anthropic 请求/响应格式 |
+| `anthropic-to-openai` | Anthropic → OpenAI 请求/响应格式 |
+
+**转换覆盖范围：**
+
+- **消息**: role、system prompt、content blocks（文本、图片、tool result）
+- **工具**: 函数定义、tool_choice、并行工具调用
+- **参数**: `max_tokens` ↔ `max_completion_tokens`、`stop` ↔ `stop_sequences`、`reasoning_effort` ↔ `thinking`、`response_format` ↔ `output_config`
+- **流式**: 完整 SSE 事件转换与状态跟踪（message_start、content_block_start/delta/stop、message_delta 等）
+- **HTTP 头**: 自动清理跨协议头（如向 OpenAI 客户端隐藏 `anthropic-version`，向 Anthropic 客户端隐藏 `Authorization`）
+
+非流式和流式响应均支持转换。转换失败时代理会降级为透传原始上游响应并记录警告日志。
 
 后续会扩展 `weighted` / `latency` / `health` 策略。
 
@@ -435,6 +476,7 @@ routes:
 - [x] 凭据环境变量注入（provider API key、admin 用户名密码）
 - [x] 文件日志轮转（按天分文件 + gzip 压缩 + 自动清理）
 - [x] E2E 集成测试（proxy + admin + SQLite 真实 TCP）
+- [x] 协议转换：每个路由目标可独立启用 OpenAI ↔ Anthropic 双向格式转换
 - [ ] 加权 / 低延迟 / 健康优先路由
 - [ ] 自动熔断触发(目前仅有状态机)
 - [ ] 成本估算 / 审计日志

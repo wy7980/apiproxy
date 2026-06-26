@@ -719,3 +719,25 @@ func TestLoginPOSTSetsSecureCookieWhenTLS(t *testing.T) {
 		t.Errorf("Secure = false for TLS request, want true")
 	}
 }
+
+
+func TestConfigRouteProviderSwitchRoundTrip(t *testing.T) {
+	in := configRouteProviderJSON{
+		Provider: "test",
+		Model:    "gpt-4",
+		Tier:     "stable",
+		Weight:   100,
+		Switch:   "openai-to-anthropic",
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out configRouteProviderJSON
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Switch != "openai-to-anthropic" {
+		t.Errorf("Switch round-trip: got %q, want %q", out.Switch, "openai-to-anthropic")
+	}
+}

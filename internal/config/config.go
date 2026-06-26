@@ -71,6 +71,7 @@ type RouteTarget struct {
 	Model    string `yaml:"model"`
 	Tier     string `yaml:"tier"`
 	Weight   int    `yaml:"weight"`
+	Switch   string `yaml:"switch,omitempty"`
 }
 
 type CircuitBreakerConfig struct {
@@ -117,6 +118,8 @@ type AdminServerConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	UsernameEnv  string `yaml:"username_env"`
 	PasswordEnv  string `yaml:"password_env"`
+	Username     string `yaml:"username,omitempty"`
+	Password     string `yaml:"password,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
@@ -164,6 +167,12 @@ func (c *Config) Validate() error {
 		for i, t := range r.Providers {
 			if _, ok := c.Providers[t.Provider]; !ok {
 				return fmt.Errorf("route %q: provider %q at index %d is not defined", name, t.Provider, i)
+			}
+			switch t.Switch {
+			case "", "openai-to-anthropic", "anthropic-to-openai":
+				// valid
+			default:
+				return fmt.Errorf("route %q: provider %q at index %d: invalid switch value %q; must be one of: '', 'openai-to-anthropic', 'anthropic-to-openai'", name, t.Provider, i, t.Switch)
 			}
 		}
 	}

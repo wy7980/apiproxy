@@ -26,6 +26,7 @@ import (
 	"github.com/wangyong/apiproxy/internal/provider/anthropic"
 	"github.com/wangyong/apiproxy/internal/router"
 	"github.com/wangyong/apiproxy/internal/storage"
+	"github.com/wangyong/apiproxy/internal/switcher"
 )
 
 // snapshot holds the immutable runtime state that is atomically swapped on
@@ -277,6 +278,27 @@ func (s *Server) handleNonStream(
 			return
 		}
 
+		// --- Switch conversion (request) ---
+		var conv *switcher.Converter
+		if target.Switch != "" {
+			dir, dirErr := switcher.ParseDirection(target.Switch)
+			if dirErr != nil {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request", dirErr.Error())
+				return
+			}
+			conv = switcher.NewConverter(dir)
+			convertedBody, convErr := conv.ConvertRequest(r.Context(), upstreamBody)
+			if convErr != nil {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+					fmt.Sprintf("request conversion failed: %v", convErr))
+				return
+			}
+			upstreamBody = convertedBody
+			s.logger.Debug("request converted for switch",
+				"request_id", requestID, "direction", target.Switch,
+				"original_bytes", len(body), "converted_bytes", len(upstreamBody))
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: false}
 		resp, perr := prov.Chat(ctx, chReq)
@@ -288,6 +310,31 @@ func (s *Server) handleNonStream(
 
 		if perr == nil && resp.Err == nil {
 			fallbackTo = target.Provider + ":" + target.Model
+			// --- Switch conversion (response) ---
+			if conv != nil {
+				convertedResp, convErr := conv.ConvertResponse(r.Context(), resp.Body)
+				if convErr != nil {
+					s.logger.Warn("response conversion failed, using original",
+						"request_id", requestID, "provider", target.Provider, "err", convErr)
+				} else {
+					resp.Body = convertedResp
+					// Update usage from converter if available
+					if pt, ct := conv.Usage(); pt > 0 || ct > 0 {
+						resp.Usage.PromptTokens = pt
+						resp.Usage.CompletionTokens = ct
+						resp.Usage.TotalTokens = pt + ct
+					}
+				}
+				// Clean headers based on direction
+				if conv.Direction() == switcher.DirOpenAItoAnthropic {
+					delete(w.Header(), "anthropic-version")
+					delete(w.Header(), "x-api-key")
+					delete(w.Header(), "anthropic-beta")
+				} else if conv.Direction() == switcher.DirAnthropicToOpenAI {
+					delete(w.Header(), "Authorization")
+				}
+			}
+
 			for k, v := range resp.Header {
 				if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
 					continue
@@ -405,6 +452,27 @@ func (s *Server) handleStream(
 			return
 		}
 
+		// --- Switch conversion (request) ---
+		var conv *switcher.Converter
+		if target.Switch != "" {
+			dir, dirErr := switcher.ParseDirection(target.Switch)
+			if dirErr != nil {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request", dirErr.Error())
+				return
+			}
+			conv = switcher.NewConverter(dir)
+			convertedBody, convErr := conv.ConvertRequest(r.Context(), upstreamBody)
+			if convErr != nil {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+					fmt.Sprintf("request conversion failed: %v", convErr))
+				return
+			}
+			upstreamBody = convertedBody
+			s.logger.Debug("request converted for switch",
+				"request_id", requestID, "direction", target.Switch,
+				"original_bytes", len(body), "converted_bytes", len(upstreamBody))
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
 		ch, perr := prov.ChatStream(ctx, chReq)
@@ -441,7 +509,21 @@ func (s *Server) handleStream(
 			}
 			// Extract usage from the final chunk if present.
 			promptTokens, completionTokens = maybeExtractUsage(chunk.Data, promptTokens, completionTokens)
-			_, _ = w.Write(chunk.Data)
+			// --- Switch streaming chunk conversion ---
+			if conv != nil {
+				convertedChunk, convErr := conv.ConvertStreamChunk(r.Context(), chunk.Data)
+				if convErr != nil {
+					s.logger.Warn("stream chunk conversion failed, skipping",
+						"request_id", requestID, "err", convErr)
+					continue
+				}
+				if len(convertedChunk) == 0 {
+					continue // filtered chunk (e.g. ping)
+				}
+				_, _ = w.Write(convertedChunk)
+			} else {
+				_, _ = w.Write(chunk.Data)
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -453,6 +535,15 @@ func (s *Server) handleStream(
 			if flusher != nil {
 				flusher.Flush()
 			}
+
+			// Use conv usage if available
+			if conv != nil {
+				if pt, ct := conv.Usage(); pt > 0 || ct > 0 {
+					promptTokens = pt
+					completionTokens = ct
+				}
+			}
+
 			latMs := float64(time.Since(start).Milliseconds())
 			ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
 			metrics.RecordRequest(metrics.RequestLog{
@@ -625,6 +716,27 @@ func (s *Server) handleAnthropicNonStream(
 			return
 		}
 
+		// --- Switch conversion (request) ---
+		var conv *switcher.Converter
+		if target.Switch != "" {
+			dir, dirErr := switcher.ParseDirection(target.Switch)
+			if dirErr != nil {
+				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", dirErr.Error())
+				return
+			}
+			conv = switcher.NewConverter(dir)
+			convertedBody, convErr := conv.ConvertRequest(r.Context(), upstreamBody)
+			if convErr != nil {
+				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
+					fmt.Sprintf("request conversion failed: %v", convErr))
+				return
+			}
+			upstreamBody = convertedBody
+			s.logger.Debug("request converted for switch",
+				"request_id", requestID, "direction", target.Switch,
+				"original_bytes", len(body), "converted_bytes", len(upstreamBody))
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: false}
 		resp, perr := prov.Chat(ctx, chReq)
@@ -636,7 +748,22 @@ func (s *Server) handleAnthropicNonStream(
 
 		if perr == nil && resp.Err == nil {
 			fallbackTo = target.Provider + ":" + target.Model
-			// Transparent: forward the upstream response as-is.
+			// --- Switch conversion (response) ---
+			if conv != nil {
+				convertedResp, convErr := conv.ConvertResponse(r.Context(), resp.Body)
+				if convErr != nil {
+					s.logger.Warn("response conversion failed, using original",
+						"request_id", requestID, "provider", target.Provider, "err", convErr)
+				} else {
+					resp.Body = convertedResp
+					if pt, ct := conv.Usage(); pt > 0 || ct > 0 {
+						resp.Usage.PromptTokens = pt
+						resp.Usage.CompletionTokens = ct
+						resp.Usage.TotalTokens = pt + ct
+					}
+				}
+			}
+
 			for k, v := range resp.Header {
 				if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
 					continue
@@ -762,6 +889,27 @@ func (s *Server) handleAnthropicStream(
 			return
 		}
 
+		// --- Switch conversion (request) ---
+		var conv *switcher.Converter
+		if target.Switch != "" {
+			dir, dirErr := switcher.ParseDirection(target.Switch)
+			if dirErr != nil {
+				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", dirErr.Error())
+				return
+			}
+			conv = switcher.NewConverter(dir)
+			convertedBody, convErr := conv.ConvertRequest(r.Context(), upstreamBody)
+			if convErr != nil {
+				writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
+					fmt.Sprintf("request conversion failed: %v", convErr))
+				return
+			}
+			upstreamBody = convertedBody
+			s.logger.Debug("request converted for switch",
+				"request_id", requestID, "direction", target.Switch,
+				"original_bytes", len(body), "converted_bytes", len(upstreamBody))
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), s.providerTimeout(snap, target.Provider))
 		chReq := &provider.ChatRequest{Body: upstreamBody, Header: r.Header, Path: r.URL.Path, Model: target.Model, Stream: true}
 		ch, perr := prov.ChatStream(ctx, chReq)
@@ -805,7 +953,21 @@ func (s *Server) handleAnthropicStream(
 			}
 			// Extract usage from Anthropic SSE events (message_start / message_delta).
 			inputTokens, outputTokens = maybeExtractUsageAnthropic(chunk.Data, inputTokens, outputTokens)
-			_, _ = w.Write(chunk.Data)
+			// --- Switch streaming chunk conversion ---
+			if conv != nil {
+				convertedChunk, convErr := conv.ConvertStreamChunk(r.Context(), chunk.Data)
+				if convErr != nil {
+					s.logger.Warn("stream chunk conversion failed, skipping",
+						"request_id", requestID, "err", convErr)
+					continue
+				}
+				if len(convertedChunk) == 0 {
+					continue // filtered chunk (e.g. ping)
+				}
+				_, _ = w.Write(convertedChunk)
+			} else {
+				_, _ = w.Write(chunk.Data)
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -826,6 +988,15 @@ func (s *Server) handleAnthropicStream(
 		if !streamFailed {
 			latMs := float64(time.Since(start).Milliseconds())
 			ftMs := float64(firstTokenTime.Sub(start).Milliseconds())
+
+			// Use conv usage if available
+			if conv != nil {
+				if pt, ct := conv.Usage(); pt > 0 || ct > 0 {
+					inputTokens = pt
+					outputTokens = ct
+				}
+			}
+
 			metrics.RecordRequest(metrics.RequestLog{
 				RequestID:        requestID,
 				ClientID:         clientID,

@@ -263,7 +263,7 @@ const dashboardHTML = `<!doctype html>
     /* ===== Route cards — multi-column grid ===== */
     .routes-list {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(680px, 1fr));
       gap: 14px;
     }
     .route-card {
@@ -272,6 +272,7 @@ const dashboardHTML = `<!doctype html>
       border-radius: 10px;
       overflow: hidden;
       transition: box-shadow 0.2s ease;
+      max-width: 820px;
     }
     .route-card:hover {
       box-shadow: 0 2px 8px rgba(49, 94, 251, 0.08);
@@ -321,7 +322,7 @@ const dashboardHTML = `<!doctype html>
     .provider-fields {
       flex: 1;
       display: grid;
-      grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) 90px 70px;
+      grid-template-columns: minmax(60px, 0.5fr) minmax(60px, 0.6fr) 90px 70px 180px;
       gap: 8px;
       align-items: center;
     }
@@ -610,6 +611,9 @@ const i18n = {
     confirm_end: "\"?",
     label_chart_token_input: " input",
     label_chart_token_output: " output",
+    switch: "Switch",
+    switch_openai_to_anthropic: "openai → anthropic",
+    switch_anthropic_to_openai: "anthropic → openai",
   },
   zh: {
     page_title: "apiproxy 性能分析",
@@ -683,6 +687,9 @@ const i18n = {
     confirm_end: "\"？",
     label_chart_token_input: " 输入",
     label_chart_token_output: " 输出",
+    switch: "协议转换",
+    switch_openai_to_anthropic: "OpenAI → Anthropic",
+    switch_anthropic_to_openai: "Anthropic → OpenAI",
   }
 };
 
@@ -1138,6 +1145,9 @@ function loadConfig() {
   }).then(function(data) {
     cfgState.providers = Array.isArray(data.providers) ? data.providers : [];
     cfgState.routes = Array.isArray(data.routes) ? data.routes : [];
+    // Sort by name
+    cfgState.providers.sort(function(a, b) { return (a.name || "").localeCompare(b.name || ""); });
+    cfgState.routes.sort(function(a, b) { return (a.name || "").localeCompare(b.name || ""); });
     cfgState.providerNames = cfgState.providers.map(function(p) { return p.name; }).sort();
     renderProviders();
     renderRoutes();
@@ -1148,6 +1158,8 @@ function loadConfig() {
 
 function renderProviders() {
   var t = i18n[currentLang];
+  // Sort by name
+  cfgState.providers.sort(function(a, b) { return (a.name || "").localeCompare(b.name || ""); });
   var body = eid("providersBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.providers.length; i++) {
@@ -1289,6 +1301,8 @@ function addProvider() {
 
 function renderRoutes() {
   var t = i18n[currentLang];
+  // Sort by name
+  cfgState.routes.sort(function(a, b) { return (a.name || "").localeCompare(b.name || ""); });
   var body = eid("routesBody");
   body.innerHTML = "";
   for (var i = 0; i < cfgState.routes.length; i++) {
@@ -1383,7 +1397,7 @@ function routeCard(r, idx) {
 
   var addTargetBtn = el("button", {class: "icon-btn"}, [t.btn_add_provider_target || "+ Add provider target"]);
   addTargetBtn.addEventListener("click", function() {
-    r.providers.push({ provider: "", model: "", tier: "", weight: 0 });
+    r.providers.push({ provider: "", model: "", tier: "", weight: 0, switch: "" });
     refreshProviders();
   });
 
@@ -1458,7 +1472,8 @@ function providerTargetCard(route, j, onReorder) {
     field("Provider", provSel),
     field("Model", modelInput),
     field("Tier", tierSel),
-    field("Weight", weightInput)
+    field("Weight", weightInput),
+    buildSwitchField(target, t)
   ]);
 
   var actions = el("div", {class: "provider-actions"}, [upBtn, downBtn, delBtn]);
@@ -1519,6 +1534,71 @@ function providerTargetCard(route, j, onReorder) {
 
 // dragState holds the in-flight drag source for provider reordering.
 var dragState = { route: null, fromIdx: -1, onReorder: null };
+
+// buildSwitchField creates the Switch checkbox + direction select column.
+function buildSwitchField(target, t) {
+  var switchEnabled = target.switch && target.switch !== "";
+  var switchField = document.createElement("div");
+  switchField.className = "field";
+
+  var swLabel = document.createElement("span");
+  swLabel.className = "field-label";
+  swLabel.textContent = t.switch || "Switch";
+
+  var swRow = document.createElement("div");
+  swRow.style.display = "flex";
+  swRow.style.flexDirection = "row";
+  swRow.style.alignItems = "center";
+  swRow.style.gap = "6px";
+
+  var swCheck = document.createElement("input");
+  swCheck.type = "checkbox";
+  swCheck.checked = switchEnabled;
+  swCheck.style.width = "auto";
+
+  var swSelect = document.createElement("select");
+  swSelect.style.width = "auto";
+  swSelect.style.flex = "1";
+  swSelect.style.fontSize = "11px";
+  swSelect.disabled = !switchEnabled;
+
+  function buildSwitchOptions(sel, current) {
+    sel.innerHTML = "";
+    var o1 = document.createElement("option");
+    o1.value = "openai-to-anthropic";
+    o1.textContent = t.switch_openai_to_anthropic || "openai → anthropic";
+    if (current === "openai-to-anthropic") o1.selected = true;
+    sel.appendChild(o1);
+    var o2 = document.createElement("option");
+    o2.value = "anthropic-to-openai";
+    o2.textContent = t.switch_anthropic_to_openai || "anthropic → openai";
+    if (current === "anthropic-to-openai") o2.selected = true;
+    sel.appendChild(o2);
+  }
+  buildSwitchOptions(swSelect, target.switch);
+
+  swCheck.addEventListener("change", function() {
+    swSelect.disabled = !swCheck.checked;
+    if (!swCheck.checked) {
+      target.switch = "";
+      swSelect.value = "openai-to-anthropic";
+    } else {
+      target.switch = swSelect.value;
+    }
+  });
+
+  swSelect.addEventListener("change", function() {
+    if (swCheck.checked) {
+      target.switch = swSelect.value;
+    }
+  });
+
+  swRow.appendChild(swCheck);
+  swRow.appendChild(swSelect);
+  switchField.appendChild(swLabel);
+  switchField.appendChild(swRow);
+  return switchField;
+}
 
 // moveProvider swaps a provider target with its neighbor in the given direction.
 function moveProvider(route, j, dir, onReorder) {

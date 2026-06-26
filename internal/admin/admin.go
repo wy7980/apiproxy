@@ -578,6 +578,7 @@ type configRouteProviderJSON struct {
 	Model    string `json:"model"`
 	Tier     string `json:"tier"`
 	Weight   int    `json:"weight"`
+	Switch   string `json:"switch"`
 }
 
 // configFallbackJSON is the wire format for fallback policy.
@@ -650,6 +651,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
 				Model:    t.Model,
 				Tier:     t.Tier,
 				Weight:   t.Weight,
+				Switch:   t.Switch,
 			})
 		}
 		resp.Routes = append(resp.Routes, rt)
@@ -735,6 +737,7 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 				Model:    t.Model,
 				Tier:     t.Tier,
 				Weight:   t.Weight,
+				Switch:   t.Switch,
 			})
 		}
 		newCfg.Routes[name] = r
